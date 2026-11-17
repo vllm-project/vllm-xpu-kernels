@@ -15,8 +15,10 @@
 #include "quantization/swiglu_limit.h"
 #include "quantization/mx_quant_utils.h"
 #include "quantization/utils.h"
+#include "quant_ns.h"
 
 namespace vllm {
+inline namespace VLLM_QUANT_KERNEL_NS {
 template <typename scalar_t, typename out_t, int CPT, bool CLAMP = false>
 class silu_and_mul_per_block_quant_kernel {
  public:
@@ -250,7 +252,10 @@ class silu_and_mul_mxfp8_quant_kernel {
   const float swiglu_limit;
 };
 
+}  // namespace VLLM_QUANT_KERNEL_NS
 }  // namespace vllm
+
+namespace VLLM_QUANT_NS {
 
 void silu_and_mul_per_block_quant(
     torch::Tensor& out,
@@ -452,3 +457,5 @@ void silu_and_mul_per_block_quant(
         }
       });
 }
+
+}  // namespace VLLM_QUANT_NS

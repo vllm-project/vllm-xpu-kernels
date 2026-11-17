@@ -10,3 +10,11 @@
 #ifndef VLLM_QUANT_NS
   #define VLLM_QUANT_NS vllm_quant_fallback
 #endif
+
+// SYCL names a kernel by its functor type, so the two builds also need
+// distinct kernel namespaces or only the first registered image would run.
+#ifdef VLLM_QUANT_ASM_BUILD
+  #define VLLM_QUANT_KERNEL_NS quant_kernels_asm
+#else
+  #define VLLM_QUANT_KERNEL_NS quant_kernels_fallback
+#endif

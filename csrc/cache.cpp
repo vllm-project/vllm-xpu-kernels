@@ -29,6 +29,7 @@ constexpr int kDsMlaRopeOffset = kDsMlaScalesOffset + kDsMlaNumTiles * 4;
 constexpr int kDsMlaEntryBytes = kDsMlaRopeOffset + kDsMlaPeDim * 2;
 
 namespace vllm {
+inline namespace VLLM_QUANT_KERNEL_NS {
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 class reshape_and_cache_kernel {
@@ -1076,6 +1077,7 @@ class cp_gather_and_upconvert_fp8_kv_cache_kernel {
   const int64_t dst_entry_stride_;
 };
 
+}  // namespace VLLM_QUANT_KERNEL_NS
 }  // namespace vllm
 
 // Only reshape_and_cache_flash has an Xe3p asm quant path and is routed through
@@ -1087,7 +1089,7 @@ class cp_gather_and_upconvert_fp8_kv_cache_kernel {
 // libquant_asm_xe_3.so).
 
 #ifndef VLLM_QUANT_ASM_BUILD
-  // KV_T is the stored data type of kv-cache.
+   // KV_T is the stored data type of kv-cache.
   // CACHE_T is the data type of key and value tensors.
   // KV_DTYPE is the real data type of kv-cache.
   #define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)        \

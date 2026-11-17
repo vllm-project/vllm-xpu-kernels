@@ -2,6 +2,7 @@
 #pragma once
 
 #include <sycl/sycl.hpp>
+#include <sycl/ext/oneapi/bfloat16.hpp>
 #include <cstdint>
 #include <type_traits>
 
@@ -10,16 +11,19 @@
 #include "quantization/utils.h"
 
 #include "quantization/fp4/mxfp4_quant_asm.h"
+#include "quant_ns.h"
 
 namespace vllm {
 namespace mxfp4 {
+inline namespace VLLM_QUANT_KERNEL_NS {
 
 // Maximum representable FP4 E2M1 value.
 static constexpr float FP4_MAX = 6.0f;
 
 // Convert a single float32 value to a 4-bit FP4 E2M1 code (stored in the
-// lower 4 bits of a uint8_t). Matches the to_mxfp reference: rounds to bf16
-// first, then to e2m1 with round-to-nearest-even (RNE).
+// lower 4 bits of a uint8_t). Matches the to_mxfp reference and the Xe3p
+// dnscl path: rounds to bf16 first, then to e2m1 with round-to-nearest-even
+// (RNE).
 inline uint8_t float_to_fp4_e2m1(float x) {
   // E2M1 midpoints shifted by half a bf16 ulp, so that comparing x matches
   // comparing bf16(x); >= where the tie rounds up to the even code.
@@ -137,8 +141,7 @@ class per_token_group_quant_mxfp4_kernel {
     const float inv_scale = 1.0f / y_s;
 
     if (lane_id < group_size) {
-      float scaled_val =
-          mxfp4_scale_clamp_asm(group_input[lane_id], inv_scale);
+      float scaled_val = mxfp4_scale_clamp_asm(group_input[lane_id], inv_scale);
       uint8_t fp4_val = float_to_fp4_e2m1(scaled_val);
 
       // Pack: even lane → low nibble, odd lane (lane+1) → high nibble.
@@ -442,8 +445,30 @@ inline float mxfp4_pow2_scale(float absmax, float eps, float& inv_scale) {
 template <typename scalar_t>
 inline uint32_t mxfp4_pack8(const float (&val)[8], float inv_scale) {
   uint32_t o;
+#ifdef VLLM_MXFP4_QUANT_ASM_ENABLED
+  uint32_t w[4];
+  #pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const float s0 =
+        sycl::fmax(-FP4_MAX, sycl::fmin(val[2 * i] * inv_scale, FP4_MAX));
+    const float s1 =
+        sycl::fmax(-FP4_MAX, sycl::fmin(val[2 * i + 1] * inv_scale, FP4_MAX));
+    if constexpr (std::is_same_v<scalar_t, at::BFloat16>) {
+      const uint32_t u0 = sycl::bit_cast<uint32_t>(s0);
+      const uint32_t u1 = sycl::bit_cast<uint32_t>(s1);
+      w[i] = (u1 & 0xFFFF0000u) | (u0 >> 16);
+    } else {
+      const uint32_t b0 =
+          sycl::bit_cast<uint16_t>(sycl::ext::oneapi::bfloat16(s0));
+      const uint32_t b1 =
+          sycl::bit_cast<uint16_t>(sycl::ext::oneapi::bfloat16(s1));
+      w[i] = b0 | (b1 << 16);
+    }
+  }
+  o = dnscl_bf16x8_to_e2m1(w[0], w[1], w[2], w[3]);
+#else
   uint32_t word = 0;
-#pragma unroll
+  #pragma unroll
   for (int k = 0; k < 8; ++k) {
     const float s =
         sycl::fmax(-FP4_MAX, sycl::fmin(val[k] * inv_scale, FP4_MAX));
@@ -451,6 +476,7 @@ inline uint32_t mxfp4_pack8(const float (&val)[8], float inv_scale) {
     word |= static_cast<uint32_t>(code & 0x0Fu) << (4 * k);
   }
   o = word;
+#endif
   return o;
 }
 
@@ -714,5 +740,6 @@ class per_token_group_quant_mxfp4_moe_slm_kernel {
   }
 };
 
+}  // namespace VLLM_QUANT_KERNEL_NS
 }  // namespace mxfp4
 }  // namespace vllm

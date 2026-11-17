@@ -18,9 +18,11 @@
 #include "quantization/fp4/mxfp4_quant.h"
 #include "quantization/mx_quant_utils.h"
 #include "quantization/utils.h"
+#include "quant_ns.h"
 #include <ATen/DeviceGuard.h>
 
 namespace vllm {
+inline namespace VLLM_QUANT_KERNEL_NS {
 template <typename scalar_t>
 struct alignas(8) vec4_t {
   scalar_t val[4];
@@ -1563,8 +1565,11 @@ void call_rms_norm_mxfp4_quant_kernel(
   }
 }
 
+}  // namespace VLLM_QUANT_KERNEL_NS
 }  // namespace vllm
 
+// No asm path: compiled only into _C.
+#ifndef VLLM_QUANT_ASM_BUILD
 void rms_norm_dynamic_per_token_quant(
     torch::Tensor& out,
     torch::Tensor const& input,
@@ -1623,6 +1628,9 @@ void rms_norm_dynamic_per_token_quant(
         });
   }
 }
+#endif  // VLLM_QUANT_ASM_BUILD
+
+namespace VLLM_QUANT_NS {
 
 void rms_norm_per_block_quant(
     torch::Tensor& out,
@@ -1692,6 +1700,10 @@ void rms_norm_per_block_quant(
         });
   }
 }
+
+}  // namespace VLLM_QUANT_NS
+
+#ifndef VLLM_QUANT_ASM_BUILD
 void rms_norm_static_fp8_quant(
     torch::Tensor& out,
     torch::Tensor& input,
@@ -1747,6 +1759,9 @@ void fused_add_rms_norm_static_fp8_quant(
             });
       });
 }
+#endif  // VLLM_QUANT_ASM_BUILD
+
+namespace VLLM_QUANT_NS {
 
 void rms_norm_mxfp4_quant(
     torch::Tensor& out,
@@ -1796,3 +1811,5 @@ void rms_norm_mxfp4_quant(
             is_scale_transposed);
       });
 }
+
+}  // namespace VLLM_QUANT_NS

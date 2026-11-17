@@ -70,6 +70,55 @@ void reshape_and_cache_flash(
     torch::Tensor& k_scale,
     torch::Tensor& v_scale);
 
+void rms_norm_per_block_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor const& weight,
+    torch::Tensor& scales,
+    double const epsilon,
+    std::optional<torch::Tensor> scale_ub,
+    std::optional<torch::Tensor> residual,
+    int64_t group_size,
+    bool is_scale_transposed,
+    bool scale_ue8m0);
+
+void rms_norm_mxfp4_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor const& weight,
+    torch::Tensor& scales,
+    double const epsilon,
+    std::optional<torch::Tensor> residual,
+    int64_t group_size);
+
+void silu_and_mul_per_block_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor& scales,
+    int64_t group_size,
+    std::optional<torch::Tensor> scale_ub,
+    bool is_scale_transposed,
+    bool scale_ue8m0,
+    std::optional<torch::Tensor> expert_scale_desc,
+    std::optional<double> swiglu_limit);
+
+void silu_and_mul_mxfp4_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor& scales,
+    int64_t group_size,
+    double eps,
+    std::optional<double> swiglu_limit);
+
+void silu_and_mul_per_token_group_quant_mxfp4(
+    const torch::Tensor& input,
+    torch::Tensor& output_q,
+    torch::Tensor& output_s,
+    int64_t group_size,
+    double eps,
+    const c10::optional<torch::Tensor>& expert_scale_desc,
+    std::optional<double> swiglu_limit);
+
 }  // namespace vllm_quant_fallback
 
 #ifdef VLLM_QUANT_ASM_AVAILABLE
@@ -123,6 +172,55 @@ void reshape_and_cache_flash(
     const std::string& kv_cache_dtype,
     torch::Tensor& k_scale,
     torch::Tensor& v_scale);
+
+void rms_norm_per_block_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor const& weight,
+    torch::Tensor& scales,
+    double const epsilon,
+    std::optional<torch::Tensor> scale_ub,
+    std::optional<torch::Tensor> residual,
+    int64_t group_size,
+    bool is_scale_transposed,
+    bool scale_ue8m0);
+
+void rms_norm_mxfp4_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor const& weight,
+    torch::Tensor& scales,
+    double const epsilon,
+    std::optional<torch::Tensor> residual,
+    int64_t group_size);
+
+void silu_and_mul_per_block_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor& scales,
+    int64_t group_size,
+    std::optional<torch::Tensor> scale_ub,
+    bool is_scale_transposed,
+    bool scale_ue8m0,
+    std::optional<torch::Tensor> expert_scale_desc,
+    std::optional<double> swiglu_limit);
+
+void silu_and_mul_mxfp4_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor& scales,
+    int64_t group_size,
+    double eps,
+    std::optional<double> swiglu_limit);
+
+void silu_and_mul_per_token_group_quant_mxfp4(
+    const torch::Tensor& input,
+    torch::Tensor& output_q,
+    torch::Tensor& output_s,
+    int64_t group_size,
+    double eps,
+    const c10::optional<torch::Tensor>& expert_scale_desc,
+    std::optional<double> swiglu_limit);
 
 }  // namespace vllm_quant_asm
 #endif  // VLLM_QUANT_ASM_AVAILABLE
@@ -257,6 +355,114 @@ void reshape_and_cache_flash(
       kv_cache_dtype,
       k_scale,
       v_scale);
+}
+
+void rms_norm_per_block_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor const& weight,
+    torch::Tensor& scales,
+    double const epsilon,
+    std::optional<torch::Tensor> scale_ub,
+    std::optional<torch::Tensor> residual,
+    int64_t group_size,
+    bool is_scale_transposed,
+    bool scale_ue8m0) {
+  VLLM_QUANT_ROUTE(
+      rms_norm_per_block_quant,
+      input,
+      out,
+      input,
+      weight,
+      scales,
+      epsilon,
+      scale_ub,
+      residual,
+      group_size,
+      is_scale_transposed,
+      scale_ue8m0);
+}
+
+void rms_norm_mxfp4_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor const& weight,
+    torch::Tensor& scales,
+    double const epsilon,
+    std::optional<torch::Tensor> residual,
+    int64_t group_size) {
+  VLLM_QUANT_ROUTE(
+      rms_norm_mxfp4_quant,
+      input,
+      out,
+      input,
+      weight,
+      scales,
+      epsilon,
+      residual,
+      group_size);
+}
+
+void silu_and_mul_per_block_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor& scales,
+    int64_t group_size,
+    std::optional<torch::Tensor> scale_ub,
+    bool is_scale_transposed,
+    bool scale_ue8m0,
+    std::optional<torch::Tensor> expert_scale_desc,
+    std::optional<double> swiglu_limit) {
+  VLLM_QUANT_ROUTE(
+      silu_and_mul_per_block_quant,
+      input,
+      out,
+      input,
+      scales,
+      group_size,
+      scale_ub,
+      is_scale_transposed,
+      scale_ue8m0,
+      expert_scale_desc,
+      swiglu_limit);
+}
+
+void silu_and_mul_mxfp4_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor& scales,
+    int64_t group_size,
+    double eps,
+    std::optional<double> swiglu_limit) {
+  VLLM_QUANT_ROUTE(
+      silu_and_mul_mxfp4_quant,
+      input,
+      out,
+      input,
+      scales,
+      group_size,
+      eps,
+      swiglu_limit);
+}
+
+void silu_and_mul_per_token_group_quant_mxfp4(
+    const torch::Tensor& input,
+    torch::Tensor& output_q,
+    torch::Tensor& output_s,
+    int64_t group_size,
+    double eps,
+    const c10::optional<torch::Tensor>& expert_scale_desc,
+    std::optional<double> swiglu_limit) {
+  VLLM_QUANT_ROUTE(
+      silu_and_mul_per_token_group_quant_mxfp4,
+      input,
+      input,
+      output_q,
+      output_s,
+      group_size,
+      eps,
+      expert_scale_desc,
+      swiglu_limit);
 }
 
 #undef VLLM_QUANT_ROUTE

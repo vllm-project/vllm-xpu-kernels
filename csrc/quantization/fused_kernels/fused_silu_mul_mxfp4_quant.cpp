@@ -14,8 +14,10 @@
 #include "quantization/mx_quant_utils.h"
 #include "quantization/swiglu_limit.h"
 #include "quantization/utils.h"
+#include "quant_ns.h"
 
 namespace vllm {
+inline namespace VLLM_QUANT_KERNEL_NS {
 // Input  [M, 2*H]   – concatenated (gate, up) activations
 // Output [M, H/2]   – packed FP4 nibbles, two per byte (low=even, high=odd)
 // Scales [M, H/32]  – float32 UE8M0 (power-of-two) scales
@@ -98,7 +100,10 @@ class silu_and_mul_mxfp4_quant_kernel {
   const float swiglu_limit;
 };
 
+}  // namespace VLLM_QUANT_KERNEL_NS
 }  // namespace vllm
+
+namespace VLLM_QUANT_NS {
 
 void silu_and_mul_mxfp4_quant(
     torch::Tensor& out,
@@ -191,3 +196,5 @@ void silu_and_mul_mxfp4_quant(
         }
       });
 }
+
+}  // namespace VLLM_QUANT_NS

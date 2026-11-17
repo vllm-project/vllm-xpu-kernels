@@ -33,6 +33,8 @@
 //   eps                   – absolute minimum to avoid log2(0); default 1e-10
 //
 
+namespace VLLM_QUANT_NS {
+
 namespace {
 
 // Quantize a 16-bit input with a [M, N/32] scale tensor. Contiguous
@@ -139,8 +141,6 @@ void launch_mxfp4_half_quant(
 }
 
 }  // namespace
-
-namespace VLLM_QUANT_NS {
 
 void per_token_group_quant_mxfp4(
     const torch::Tensor& input,
@@ -425,6 +425,9 @@ void per_token_group_quant_mxfp4(
             launch(std::integral_constant<int, 1>{});
           }
         } else {
+          // Keep the c10 scalar type here: the scalar kernel calls
+          // mxfp4_scale_clamp_asm, whose inline-ASM specialisations are
+          // keyed on at::Half / at::BFloat16.
           queue.submit([&](sycl::handler& cgh) {
             auto kernel =
                 vllm::mxfp4::per_token_group_quant_mxfp4_kernel<scalar_t>(
@@ -443,11 +446,6 @@ void per_token_group_quant_mxfp4(
         }
       });
 }
-
-}  // namespace VLLM_QUANT_NS
-
-// No asm path yet: compiled only into _C.
-#ifndef VLLM_QUANT_ASM_BUILD
 
 // silu_and_mul_per_token_group_quant_mxfp4
 //
@@ -619,4 +617,4 @@ void silu_and_mul_per_token_group_quant_mxfp4(
       });
 }
 
-#endif  // VLLM_QUANT_ASM_BUILD
+}  // namespace VLLM_QUANT_NS
