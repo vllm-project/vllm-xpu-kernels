@@ -53,7 +53,8 @@ def test_mxfp4_gemm_w4a16(mnk_factors, dtype, use_bias):
     torch.testing.assert_close(output.float(), ref, atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.parametrize("bad", ["a_k_strided", "k_not_32", "scale_shape"])
+@pytest.mark.parametrize(
+    "bad", ["a_k_strided", "k_not_32", "scale_shape", "bias_strided"])
 def test_mxfp4_gemm_w4a16_rejects_bad_layout(bad):
     """Layouts the kernel would misread raise instead of returning garbage."""
     m, n, k = 4, 64, 128
@@ -65,6 +66,9 @@ def test_mxfp4_gemm_w4a16_rejects_bad_layout(bad):
     w = torch.randint(0, 256, (n, k // 2), dtype=torch.uint8).xpu()
     s = torch.full((max(k // 32, 1) + (bad == "scale_shape"), n), 127,
                    dtype=torch.uint8).xpu()
+    bias = None
+    if bad == "bias_strided":
+        bias = torch.randn(2 * n, dtype=torch.bfloat16).xpu()[::2]
     with pytest.raises(RuntimeError):
         mxfp4_gemm_w4a16(a, w.view(torch.float4_e2m1fn_x2).t(),
-                         s.view(torch.float8_e8m0fnu), None)
+                         s.view(torch.float8_e8m0fnu), bias)

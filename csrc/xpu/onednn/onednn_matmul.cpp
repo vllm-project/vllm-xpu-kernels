@@ -279,6 +279,8 @@ torch::Tensor mxfp4_gemm_w4a16(
           B_scale.is_contiguous() && B_scale.dim() == 2 &&
           B_scale.size(0) == K / 32 && B_scale.size(1) == N,
       "B_scale must be contiguous [K/32, N] e8m0");
+  TORCH_CHECK(
+      !bias.has_value() || bias->is_contiguous(), "bias must be contiguous");
   torch::Tensor result = at::empty({A.size(0), B.size(1)}, A.options());
   if (A.size(0) > 0) {
     oneDNN::dnnl_matmul_w4a16_mxfp4(result, A, B, bias, B_scale);
