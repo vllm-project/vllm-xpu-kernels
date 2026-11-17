@@ -326,6 +326,88 @@ def test_rms_norm_per_block_quant(
                                    rtol=1e-2)
 
 
+# Regression test: the quant loop reduces a group within one 32-lane sub-group,
+# so groups wider than 32 chunks (fp32 group 256 at one chunk per lane) must be
+# split over more chunks per lane. Each group's absmax sits in its last element
+# so a partial reduction gives a wrong scale; 8192 tokens saturates the device.
+@pytest.mark.parametrize("num_tokens", [3, 8192])
+@pytest.mark.parametrize("group_size", [256, 512, 1024])
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+@pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
+@pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.int8])
+@torch.inference_mode()
+def test_rms_norm_per_block_quant_wide_group(
+    num_tokens: int,
+    group_size: int,
+    add_residual: bool,
+    dtype: torch.dtype,
+    quant_dtype: torch.dtype,
+) -> None:
+    torch.manual_seed(0)
+    hidden_size = 2048
+    layer = RMSNorm(hidden_size, eps=EPS).to(device="xpu", dtype=dtype)
+    layer.weight.data.fill_(1.0)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device="xpu")
+    x.view(num_tokens, -1, group_size)[..., -1] = 16.0
+    residual = torch.zeros_like(x) if add_residual else None
+
+    if dtype == torch.float and group_size == 1024:
+        # 256 chunks per group cannot fit a sub-group even at 4 per lane.
+        with pytest.raises(RuntimeError, match="too large"):
+            _ops_per_group_quant(layer.weight.data, x, quant_dtype, group_size,
+                                 residual)
+        return
+
+    ref_normed, _ = _ref_rms_norm(layer, x, residual)
+    ref_q, ref_scales = _ref_per_group_quant(ref_normed, group_size,
+                                             quant_dtype)
+    ops_q, ops_scales, _ = _ops_per_group_quant(layer.weight.data, x,
+                                                quant_dtype, group_size,
+                                                residual)
+
+    torch.testing.assert_close(ref_scales, ops_scales, atol=1e-4, rtol=1e-3)
+    num_groups = hidden_size // group_size
+    ref_deq = ref_q.float().view(num_tokens, num_groups,
+                                 group_size) * ref_scales.unsqueeze(-1)
+    ops_deq = ops_q.float().view(num_tokens, num_groups,
+                                 group_size) * ops_scales.unsqueeze(-1)
+    torch.testing.assert_close(ref_deq, ops_deq, atol=0.2, rtol=0.15)
+
+
+# Rows too wide for the MX kernel (hidden 32768 bf16) fall back to the
+# per-block kernel, which stages the whole row in SLM.
+@pytest.mark.parametrize("num_tokens", [1, 64])
+@pytest.mark.parametrize("hidden_size", [32768])
+@torch.inference_mode()
+def test_rms_norm_per_block_quant_mx_wide_row(num_tokens: int,
+                                              hidden_size: int) -> None:
+    torch.manual_seed(0)
+    layer = RMSNorm(hidden_size, eps=EPS).to(device="xpu",
+                                             dtype=torch.bfloat16)
+    layer.weight.data.normal_(mean=1.0, std=0.1)
+    x = torch.randn(num_tokens,
+                    hidden_size,
+                    dtype=torch.bfloat16,
+                    device="xpu")
+
+    ref_normed, _ = _ref_rms_norm(layer, x, None)
+    ref_q, ref_scales = _ref_per_group_quant(ref_normed,
+                                             32,
+                                             torch.float8_e4m3fn,
+                                             scale_ue8m0=True)
+    ops_q, ops_scales, _ = _ops_per_group_quant(layer.weight.data,
+                                                x,
+                                                torch.float8_e4m3fn,
+                                                32,
+                                                None,
+                                                scale_ue8m0=True)
+
+    torch.testing.assert_close(ref_scales, ops_scales, atol=0, rtol=0)
+    ref_deq = ref_q.float().view(num_tokens, -1, 32) * ref_scales.unsqueeze(-1)
+    ops_deq = ops_q.float().view(num_tokens, -1, 32) * ops_scales.unsqueeze(-1)
+    torch.testing.assert_close(ref_deq, ops_deq, atol=0.2, rtol=0.15)
+
+
 @pytest.mark.parametrize("num_tokens", [4, 83])
 @pytest.mark.parametrize("hidden_size", [128, 1536])
 @pytest.mark.parametrize("group_size", GROUP_SIZES)

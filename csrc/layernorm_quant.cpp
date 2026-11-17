@@ -1294,10 +1294,33 @@ void call_rms_norm_per_block_quant_kernel(
   sycl_t* residual_ptr =
       residual.has_value() ? (sycl_t*)residual->data_ptr<scalar_t>() : nullptr;
 
+  int cpt = 1;
+  if constexpr (sizeof(scalar_t) == 2) {
+    dispatch_quant_chunks(
+        num_tokens, num_chunks, chunks_per_group, eu_count, [&](auto tag) {
+          cpt = decltype(tag)::value;
+        });
+  }
+  // The quant loop reduces a group within one 32-lane sub-group, so wide
+  // groups need enough chunks per thread to fit (fp32 group 256 needs 64
+  // lanes at CPT == 1).
+  constexpr int kMaxLanesPerGroup = 32;
+  if (chunks_per_group / cpt > kMaxLanesPerGroup) cpt = 4;
+  TORCH_CHECK(
+      chunks_per_group % cpt == 0 &&
+          chunks_per_group / cpt <= kMaxLanesPerGroup,
+      "rms_norm_per_block_quant: group_size ",
+      group_size,
+      " is too large for ",
+      input.scalar_type(),
+      " input");
+
   auto launch_res = [&](auto cpt_tag, auto res_tag) {
-    // Wider per-thread tiles are only specialised for 16-bit activations;
-    // fp32 input keeps one chunk per thread (binary size).
-    constexpr int CPT = sizeof(scalar_t) != 2 ? 1 : decltype(cpt_tag)::value;
+    // fp32 input only uses CPT == 1, or CPT == 4 for groups wider than a
+    // sub-group; fold CPT == 2 onto 1 so it is not instantiated (binary size).
+    constexpr int CPT = sizeof(scalar_t) != 2 && decltype(cpt_tag)::value == 2
+                            ? 1
+                            : decltype(cpt_tag)::value;
     // Only the variance pass reduces over the group; the quantized store loop
     // reduces within a sub-group, so it uses the barrier-free sizing rule.
     const int64_t block_size = fused_norm_quant_block_size(
@@ -1336,11 +1359,12 @@ void call_rms_norm_per_block_quant_kernel(
     }
   };
 
-  if constexpr (sizeof(scalar_t) != 2) {
-    launch(std::integral_constant<int, 1>{});
+  if (cpt == 4) {
+    launch(std::integral_constant<int, 4>{});
+  } else if (cpt == 2) {
+    launch(std::integral_constant<int, 2>{});
   } else {
-    dispatch_quant_chunks(
-        num_tokens, num_chunks, chunks_per_group, eu_count, launch);
+    launch(std::integral_constant<int, 1>{});
   }
 }
 
