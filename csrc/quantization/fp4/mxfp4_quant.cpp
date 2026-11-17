@@ -54,26 +54,18 @@ void launch_mxfp4_half_quant(
     const int64_t num_wgs = (num_groups + kFlatWgSize - 1) / kFlatWgSize;
     VLLM_DISPATCH_HALF_TYPES(
         input.scalar_type(), "per_token_group_quant_mxfp4_flat_kernel", [&] {
-          auto launch = [&](auto* scale_ptr) {
-            using scale_t = std::remove_pointer_t<decltype(scale_ptr)>;
-            queue.submit([&](sycl::handler& cgh) {
-              auto kernel = vllm::mxfp4::
-                  per_token_group_quant_mxfp4_flat_kernel<scalar_t, scale_t>(
-                      output_q.data_ptr<uint8_t>(),
-                      scale_ptr,
-                      input.data_ptr<scalar_t>(),
-                      num_groups,
-                      static_cast<float>(eps));
-              cgh.parallel_for(
-                  sycl::nd_range<1>(num_wgs * kFlatWgSize, kFlatWgSize),
-                  kernel);
-            });
-          };
-          if (scale_is_e8m0) {
-            launch(static_cast<uint8_t*>(output_s.data_ptr()));
-          } else {
-            launch(output_s.data_ptr<float>());
-          }
+          queue.submit([&](sycl::handler& cgh) {
+            auto kernel =
+                vllm::mxfp4::per_token_group_quant_mxfp4_flat_kernel<scalar_t>(
+                    output_q.data_ptr<uint8_t>(),
+                    output_s.data_ptr(),
+                    input.data_ptr<scalar_t>(),
+                    num_groups,
+                    static_cast<float>(eps),
+                    scale_is_e8m0);
+            cgh.parallel_for(
+                sycl::nd_range<1>(num_wgs * kFlatWgSize, kFlatWgSize), kernel);
+          });
         });
     return;
   }
@@ -119,46 +111,29 @@ void launch_mxfp4_half_quant(
 
   VLLM_DISPATCH_HALF_TYPES(
       input.scalar_type(), "per_token_group_quant_mxfp4_tile_kernel", [&] {
-        auto launch = [&](auto* scale_ptr, auto col_major_tag) {
-          using scale_t = std::remove_pointer_t<decltype(scale_ptr)>;
-          constexpr bool COL_MAJOR = decltype(col_major_tag)::value;
-          queue.submit([&](sycl::handler& cgh) {
-            sycl::local_accessor<scale_t, 1> tile(
-                sycl::range<1>(tile_groups), cgh);
-            auto kernel = vllm::mxfp4::per_token_group_quant_mxfp4_tile_kernel<
-                scalar_t,
-                scale_t,
-                COL_MAJOR>(
-                output_q.data_ptr<uint8_t>(),
-                scale_ptr,
-                input.data_ptr<scalar_t>(),
-                tile,
-                groups_per_row,
-                groups_per_wg,
-                static_cast<float>(eps),
-                static_cast<int>(num_rows),
-                rows_per_wg,
-                scale_stride_token,
-                scale_stride_group);
-            cgh.parallel_for(
-                sycl::nd_range<2>(
-                    sycl::range<2>(row_wgs, k_wgs * wg_size),
-                    sycl::range<2>(1, wg_size)),
-                kernel);
-          });
-        };
-        auto dispatch_layout = [&](auto* scale_ptr) {
-          if (is_column_major) {
-            launch(scale_ptr, std::true_type{});
-          } else {
-            launch(scale_ptr, std::false_type{});
-          }
-        };
-        if (scale_is_e8m0) {
-          dispatch_layout(static_cast<uint8_t*>(output_s.data_ptr()));
-        } else {
-          dispatch_layout(output_s.data_ptr<float>());
-        }
+        queue.submit([&](sycl::handler& cgh) {
+          sycl::local_accessor<float, 1> tile(sycl::range<1>(tile_groups), cgh);
+          auto kernel =
+              vllm::mxfp4::per_token_group_quant_mxfp4_tile_kernel<scalar_t>(
+                  output_q.data_ptr<uint8_t>(),
+                  output_s.data_ptr(),
+                  input.data_ptr<scalar_t>(),
+                  tile,
+                  groups_per_row,
+                  groups_per_wg,
+                  static_cast<float>(eps),
+                  static_cast<int>(num_rows),
+                  rows_per_wg,
+                  scale_stride_token,
+                  scale_stride_group,
+                  is_column_major,
+                  scale_is_e8m0);
+          cgh.parallel_for(
+              sycl::nd_range<2>(
+                  sycl::range<2>(row_wgs, k_wgs * wg_size),
+                  sycl::range<2>(1, wg_size)),
+              kernel);
+        });
       });
 }
 
@@ -286,9 +261,14 @@ void per_token_group_quant_mxfp4(
           const int chunks_per_group = static_cast<int>(group_size) / VEC;
           const int64_t saturate_wi = static_cast<int64_t>(eu_count) * 128;
           const int64_t base_wi = static_cast<int64_t>(num_rows) * num_chunks;
+          // Wider per-thread tiles are only specialised for 16-bit inputs and
+          // rows of at least a sub-group of threads, so multi-row packing
+          // only needs CPT = 1 (binary size).
+          constexpr bool kWide = sizeof(scalar_t) == 2;
           int cpt = 1;
           for (int c : {4, 2}) {
-            if (chunks_per_group % c == 0 && base_wi / c >= saturate_wi) {
+            if (kWide && chunks_per_group % c == 0 && num_chunks / c >= 32 &&
+                base_wi / c >= saturate_wi) {
               cpt = c;
               break;
             }
@@ -304,38 +284,42 @@ void per_token_group_quant_mxfp4(
           if (wg_size < 32) wg_size = 32;
           const int64_t num_wgs = (num_rows + rows_per_wg - 1) / rows_per_wg;
           auto launch = [&](auto cpt_tag) {
-            constexpr int CPT = decltype(cpt_tag)::value;
+            // Fold the tiers that cpt never takes onto CPT = 1.
+            constexpr int kTag = decltype(cpt_tag)::value;
+            constexpr int CPT = kWide ? kTag : 1;
             if constexpr (CPT * VEC == 32) {
-              if (!moe_layout.enabled() && !is_column_major &&
-                  output_s.is_contiguous() &&
-                  scale_num_cols == hidden / group_size) {
-                constexpr int FLAT_WG_SIZE = 128;
-                const int64_t flat_groups =
-                    (static_cast<int64_t>(num_groups) + FLAT_WG_SIZE - 1) /
-                    FLAT_WG_SIZE;
-                queue.submit([&](sycl::handler& cgh) {
-                  auto kernel =
-                      vllm::mxfp4::per_token_group_quant_mxfp4_vec_kernel<
-                          scalar_t,
-                          CPT,
-                          true>(
-                          output_q.data_ptr<uint8_t>(),
-                          scale_ptr,
-                          input.data_ptr<scalar_t>(),
-                          32,
-                          32,
-                          static_cast<float>(eps),
-                          1,
-                          1,
-                          num_groups,
-                          1,
-                          moe_layout);
-                  cgh.parallel_for(
-                      sycl::nd_range<1>(
-                          flat_groups * FLAT_WG_SIZE, FLAT_WG_SIZE),
-                      kernel);
-                });
-                return;
+              {
+                if (!moe_layout.enabled() && !is_column_major &&
+                    output_s.is_contiguous() &&
+                    scale_num_cols == hidden / group_size) {
+                  constexpr int FLAT_WG_SIZE = 128;
+                  const int64_t flat_groups =
+                      (static_cast<int64_t>(num_groups) + FLAT_WG_SIZE - 1) /
+                      FLAT_WG_SIZE;
+                  queue.submit([&](sycl::handler& cgh) {
+                    auto kernel =
+                        vllm::mxfp4::per_token_group_quant_mxfp4_vec_kernel<
+                            scalar_t,
+                            CPT,
+                            true>(
+                            output_q.data_ptr<uint8_t>(),
+                            scale_ptr,
+                            input.data_ptr<scalar_t>(),
+                            32,
+                            32,
+                            static_cast<float>(eps),
+                            1,
+                            1,
+                            num_groups,
+                            1,
+                            moe_layout);
+                    cgh.parallel_for(
+                        sycl::nd_range<1>(
+                            flat_groups * FLAT_WG_SIZE, FLAT_WG_SIZE),
+                        kernel);
+                  });
+                  return;
+                }
               }
 
               // MoE scale surfaces are group-major, so a one-row work-group
@@ -420,11 +404,15 @@ void per_token_group_quant_mxfp4(
                     sycl::nd_range<1>(num_wgs * wg_size, wg_size), kernel);
               });
             };
-            if (rows_per_wg == 1) {
-              submit(std::false_type{});
-            } else {
-              submit(std::true_type{});
+            // The single-row specialisation only pays on the hot 16-bit
+            // path; fp32 rows take the generic row-packing indexing.
+            if constexpr (sizeof(scalar_t) == 2) {
+              if (rows_per_wg == 1) {
+                submit(std::false_type{});
+                return;
+              }
             }
+            if constexpr (CPT == 1) submit(std::true_type{});
           };
           if (cpt == 4) {
             launch(std::integral_constant<int, 4>{});
@@ -545,9 +533,14 @@ void silu_and_mul_per_token_group_quant_mxfp4(
         // widen the per-thread tile only while the launch still saturates.
         const int64_t saturate_wi = static_cast<int64_t>(eu_count) * 128;
         const int64_t base_wi = num_rows * num_chunks;
+        // Wider per-thread tiles are only specialised for 16-bit inputs
+        // without the (rare) swiglu clamp (binary size).
+        constexpr bool kWideCpt = sizeof(scalar_t) == 2;
+        const bool clamp = limit < vllm::kSwigluLimitDisabled;
         int cpt = 1;
         for (int c : {4, 2}) {
-          if (chunks_per_group % c == 0 && base_wi / c >= saturate_wi) {
+          if (kWideCpt && !clamp && chunks_per_group % c == 0 &&
+              num_chunks / c >= 32 && base_wi / c >= saturate_wi) {
             cpt = c;
             break;
           }
@@ -562,30 +555,50 @@ void silu_and_mul_per_token_group_quant_mxfp4(
         if (wg_size < 32) wg_size = 32;
         const int64_t num_wgs = (num_rows + rows_per_wg - 1) / rows_per_wg;
         auto launch = [&](auto cpt_tag) {
-          constexpr int CPT = decltype(cpt_tag)::value;
           vllm::dispatch_swiglu_limit(limit, [&](auto clamp_tag) {
-            queue.submit([&](sycl::handler& cgh) {
-              auto kernel = vllm::mxfp4::per_token_group_quant_mxfp4_vec_kernel<
-                  sycl_t,
-                  CPT,
-                  false,
-                  true,
-                  decltype(clamp_tag)::value>(
-                  output_q.data_ptr<uint8_t>(),
-                  scale_ptr,
-                  reinterpret_cast<const sycl_t*>(input.data_ptr<scalar_t>()),
-                  hidden,
-                  static_cast<int>(group_size),
-                  static_cast<float>(eps),
-                  scale_stride_token,
-                  scale_stride_group,
-                  static_cast<int>(num_rows),
-                  rows_per_wg,
-                  moe_layout,
-                  vllm::swiglu_limit_as<scalar_t>(limit));
-              cgh.parallel_for(
-                  sycl::nd_range<1>(num_wgs * wg_size, wg_size), kernel);
-            });
+            // cpt is always 1 without kWideCpt or with the clamp, so fold the
+            // wider tags onto the CPT = 1 instantiation.
+            constexpr bool kWideTile = kWideCpt && !decltype(clamp_tag)::value;
+            constexpr int CPT = kWideTile ? decltype(cpt_tag)::value : 1;
+            auto submit = [&](auto multi_row_tag) {
+              // Only the single-row clamp-free 16-bit path skips the clamp; all
+              // row-packing launches share one instantiation that always
+              // clamps, a no-op against kSwigluLimitDisabled (binary size).
+              constexpr bool kMultiRow = decltype(multi_row_tag)::value;
+              queue.submit([&](sycl::handler& cgh) {
+                auto kernel =
+                    vllm::mxfp4::per_token_group_quant_mxfp4_vec_kernel<
+                        sycl_t,
+                        CPT,
+                        false,
+                        true,
+                        kMultiRow,
+                        kMultiRow>(
+                        output_q.data_ptr<uint8_t>(),
+                        scale_ptr,
+                        reinterpret_cast<const sycl_t*>(
+                            input.data_ptr<scalar_t>()),
+                        hidden,
+                        static_cast<int>(group_size),
+                        static_cast<float>(eps),
+                        scale_stride_token,
+                        scale_stride_group,
+                        static_cast<int>(num_rows),
+                        rows_per_wg,
+                        moe_layout,
+                        vllm::swiglu_limit_as<scalar_t>(limit));
+                cgh.parallel_for(
+                    sycl::nd_range<1>(num_wgs * wg_size, wg_size), kernel);
+              });
+            };
+            // Wider tiles never pack several rows, see the cpt selection.
+            if constexpr (kWideTile) {
+              if (rows_per_wg == 1) {
+                submit(std::false_type{});
+                return;
+              }
+            }
+            if constexpr (CPT == 1) submit(std::true_type{});
           });
         };
         if (cpt == 4) {

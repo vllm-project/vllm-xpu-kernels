@@ -165,12 +165,9 @@ class silu_and_mul_per_block_quant_kernel {
   const float swiglu_limit;
 };
 
-// MXFP8, one lane per 16-byte vector of the output.
-template <
-    typename scalar_t,
-    typename out_t,
-    mx::ScaleLayout LAYOUT,
-    bool CLAMP = false>
+// MXFP8, one lane per 16-byte vector of the output. kMoE selects the routed
+// MoE scale surface; row- vs column-major is a uniform runtime switch.
+template <typename scalar_t, typename out_t, bool kMoE, bool CLAMP = false>
 class silu_and_mul_mxfp8_quant_kernel {
  public:
   silu_and_mul_mxfp8_quant_kernel(
@@ -181,6 +178,7 @@ class silu_and_mul_mxfp8_quant_kernel {
       const int vecs_per_row_,
       const int num_tokens_,
       const MoEScaleLayout moe_layout_,
+      const bool col_major_,
       const float swiglu_limit_ = kSwigluLimitDisabled)
       : input(input_),
         num_vecs(num_vecs_),
@@ -189,6 +187,7 @@ class silu_and_mul_mxfp8_quant_kernel {
         scales(scales_),
         num_tokens(num_tokens_),
         moe_layout(moe_layout_),
+        col_major(col_major_),
         swiglu_limit(swiglu_limit_) {}
 
   void operator()
@@ -226,9 +225,9 @@ class silu_and_mul_mxfp8_quant_kernel {
     if (!active) return;
 
     if (col % mx::kLanesPerGroup == 0) {
-      if constexpr (LAYOUT == mx::ScaleLayout::kMoE) {
+      if constexpr (kMoE) {
         moe_layout.store(token, col / mx::kLanesPerGroup, y_s);
-      } else if constexpr (LAYOUT == mx::ScaleLayout::kColMajor) {
+      } else if (col_major) {
         scales[(col / mx::kLanesPerGroup) * num_tokens + token] = y_s;
       } else {
         // Row-major: group v / 4.
@@ -247,6 +246,7 @@ class silu_and_mul_mxfp8_quant_kernel {
   float* __restrict__ scales;
   const int num_tokens;
   const MoEScaleLayout moe_layout;
+  const bool col_major;
   const float swiglu_limit;
 };
 
@@ -345,7 +345,7 @@ void silu_and_mul_per_block_quant(
               reinterpret_cast<const sycl_t*>(input.data_ptr<scalar_t>());
           float* scales_ptr =
               moe_layout.enabled() ? nullptr : scales.data_ptr<float>();
-          auto launch = [&](auto out_ptr, auto layout_tag) {
+          auto launch = [&](auto out_ptr, auto moe_tag) {
             using out_t = std::remove_pointer_t<decltype(out_ptr)>;
             vllm::dispatch_swiglu_limit(limit, [&](auto clamp_tag) {
               queue.submit([&](sycl::handler& h) {
@@ -354,7 +354,7 @@ void silu_and_mul_per_block_quant(
                     vllm::silu_and_mul_mxfp8_quant_kernel<
                         sycl_t,
                         out_t,
-                        decltype(layout_tag)::value,
+                        decltype(moe_tag)::value,
                         decltype(clamp_tag)::value>(
                         out_ptr,
                         scales_ptr,
@@ -363,18 +363,16 @@ void silu_and_mul_per_block_quant(
                         static_cast<int>(hidden_size / vllm::mx::kVec),
                         static_cast<int>(num_tokens),
                         moe_layout,
+                        is_scale_transposed,
                         vllm::swiglu_limit_as<scalar_t>(limit)));
               });
             });
           };
           auto dispatch = [&](auto out_ptr) {
-            using L = vllm::mx::ScaleLayout;
             if (moe_layout.enabled()) {
-              launch(out_ptr, std::integral_constant<L, L::kMoE>{});
-            } else if (is_scale_transposed) {
-              launch(out_ptr, std::integral_constant<L, L::kColMajor>{});
+              launch(out_ptr, std::true_type{});
             } else {
-              launch(out_ptr, std::integral_constant<L, L::kRowMajor>{});
+              launch(out_ptr, std::false_type{});
             }
           };
           if (out.dtype() == torch::kFloat8_e4m3fn) {
@@ -405,10 +403,13 @@ void silu_and_mul_per_block_quant(
 
         auto launch = [&](auto out_ptr, auto cpt_tag) {
           using out_t = std::remove_pointer_t<decltype(out_ptr)>;
-          constexpr int CPT = decltype(cpt_tag)::value;
-          const int64_t wg_size =
-              vllm::fused_quant_block_size(num_chunks / CPT, 1, false);
           vllm::dispatch_swiglu_limit(limit, [&](auto clamp_tag) {
+            // The clamped path is rare, so it only gets the CPT = 1
+            // instantiation (binary size).
+            constexpr int CPT =
+                decltype(clamp_tag)::value ? 1 : decltype(cpt_tag)::value;
+            const int64_t wg_size =
+                vllm::fused_quant_block_size(num_chunks / CPT, 1, false);
             queue.submit([&](sycl::handler& h) {
               h.parallel_for(
                   sycl::nd_range<1>(num_wgs * wg_size, wg_size),

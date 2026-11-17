@@ -177,12 +177,9 @@ class rms_norm_dynamic_per_token_quant_kernel {
   const int hidden_size;
 };
 
-template <
-    typename scalar_t,
-    typename out_t,
-    bool has_residual,
-    bool scale_ue8m0,
-    int CPT>
+// ue8m0 is a uniform runtime switch to keep the instantiation count (and
+// binary size) down.
+template <typename scalar_t, typename out_t, bool has_residual, int CPT>
 class rms_norm_per_block_quant_kernel {
  public:
   rms_norm_per_block_quant_kernel(
@@ -198,6 +195,7 @@ class rms_norm_per_block_quant_kernel {
       const int64_t scale_stride_token_,
       const int64_t scale_stride_group_,
       const int64_t input_stride_,
+      const bool scale_ue8m0_,
       sycl::local_accessor<scalar_t, 1> row_smem_)
       : out(out_),
         residual(residual_),
@@ -211,6 +209,7 @@ class rms_norm_per_block_quant_kernel {
         scale_stride_token(scale_stride_token_),
         scale_stride_group(scale_stride_group_),
         input_stride(input_stride_),
+        scale_ue8m0(scale_ue8m0_),
         row_smem(row_smem_) {}
 
   void operator()
@@ -320,7 +319,7 @@ class rms_norm_per_block_quant_kernel {
         const float fp8_max = static_cast<float>(fp8::quant_type_max_v<out_t>);
         group_scale =
             sycl::max(gmax / fp8_max, fp8::min_scaling_factor<out_t>::val());
-        if constexpr (scale_ue8m0) {
+        if (scale_ue8m0) {
           group_scale = sycl::exp2(
               sycl::ceil(
                   sycl::log2(sycl::fmax(sycl::fabs(group_scale), 1e-10f))));
@@ -372,6 +371,7 @@ class rms_norm_per_block_quant_kernel {
   const int64_t scale_stride_token;
   const int64_t scale_stride_group;
   const int64_t input_stride;
+  const bool scale_ue8m0;
   sycl::local_accessor<scalar_t, 1> row_smem;
 };
 
@@ -1022,10 +1022,10 @@ void call_rms_norm_dynamic_per_token_quant_kernel(
   const int hidden_size = input.size(-1);
   const int64_t num_tokens = input.numel() / hidden_size;
 
-  // Walk the row in 16-byte vectors whenever it divides evenly (VEC_SIZE == 1
-  // reproduces the original scalar traversal for odd hidden sizes).
-  const int vec_size =
-      std::gcd(static_cast<int>(16 / sizeof(sycl_t)), hidden_size);
+  // Walk the row in 16-byte vectors whenever it divides evenly; other hidden
+  // sizes take the original scalar traversal (VEC_SIZE == 1).
+  constexpr int kFullVec = 16 / sizeof(sycl_t);
+  const int vec_size = hidden_size % kFullVec == 0 ? kFullVec : 1;
 
   auto* out_ptr = out.data_ptr<out_t>();
   auto* input_ptr = input.data_ptr<scalar_t>();
@@ -1040,20 +1040,18 @@ void call_rms_norm_dynamic_per_token_quant_kernel(
   const int block_size = static_cast<int>(fused_norm_quant_block_size(
       num_tokens, eu_count, hidden_size / vec_size, 4, true));
 
-  auto launch = [&](auto has_residual_tag, auto vec_tag) {
-    constexpr bool has_residual = decltype(has_residual_tag)::value;
+  sycl_t* residual_ptr =
+      residual.has_value() ? (sycl_t*)residual->data_ptr<scalar_t>() : nullptr;
+
+  auto launch_res = [&](auto vec_tag, auto res_tag) {
     constexpr int VS = decltype(vec_tag)::value;
-    sycl_t* residual_ptr = nullptr;
-    if constexpr (has_residual) {
-      residual_ptr = (sycl_t*)residual->data_ptr<scalar_t>();
-    }
     queue.submit([&](sycl::handler& cgh) {
       cgh.parallel_for(
           sycl::nd_range<1>(num_tokens * block_size, block_size),
           rms_norm_dynamic_per_token_quant_kernel<
               sycl_t,
               out_t,
-              has_residual,
+              decltype(res_tag)::value,
               VS>(
               out_ptr,
               residual_ptr,
@@ -1066,27 +1064,18 @@ void call_rms_norm_dynamic_per_token_quant_kernel(
     });
   };
 
-  auto dispatch = [&](auto has_residual_tag) {
-    switch (vec_size) {
-      case 8:
-        launch(has_residual_tag, std::integral_constant<int, 8>{});
-        break;
-      case 4:
-        launch(has_residual_tag, std::integral_constant<int, 4>{});
-        break;
-      case 2:
-        launch(has_residual_tag, std::integral_constant<int, 2>{});
-        break;
-      default:
-        launch(has_residual_tag, std::integral_constant<int, 1>{});
-        break;
+  auto launch = [&](auto vec_tag) {
+    if (residual.has_value()) {
+      launch_res(vec_tag, std::true_type{});
+    } else {
+      launch_res(vec_tag, std::false_type{});
     }
   };
 
-  if (residual.has_value()) {
-    dispatch(std::true_type{});
+  if (vec_size == kFullVec) {
+    launch(std::integral_constant<int, kFullVec>{});
   } else {
-    dispatch(std::false_type{});
+    launch(std::integral_constant<int, 1>{});
   }
 }
 
@@ -1110,6 +1099,8 @@ bool try_rms_norm_mx_quant(
     float* scales_ptr,
     float epsilon,
     bool is_scale_transposed) {
+  // Only 16-bit inputs get the dedicated MX kernels; fp32 rows take the
+  // per-block / MXFP4 fallback kernels (binary size).
   if constexpr (sizeof(scalar_t) != 2) {
     return false;
   } else {
@@ -1140,59 +1131,60 @@ bool try_rms_norm_mx_quant(
       if (num_tokens == 0) return true;
       const int64_t num_vecs = num_tokens * (hidden_size / VEC);
       const int64_t wg = mx::kWorkGroupSize;
-      auto launch_short =
-          [&](auto has_residual_tag, auto hidden_tag, auto col_tag) {
-            queue.submit([&](sycl::handler& cgh) {
-              cgh.parallel_for(
-                  sycl::nd_range<1>((num_vecs + wg - 1) / wg * wg, wg),
-                  rms_norm_mx_quant_short_kernel<
-                      sycl_t,
-                      out_t,
-                      decltype(has_residual_tag)::value,
-                      decltype(hidden_tag)::value,
-                      decltype(col_tag)::value>(
-                      out_ptr,
-                      residual_ptr,
-                      reinterpret_cast<const sycl_t*>(input.data_ptr()),
-                      reinterpret_cast<const sycl_t*>(weight.data_ptr()),
-                      scales_ptr,
-                      epsilon,
-                      static_cast<int>(num_tokens),
-                      static_cast<int>(input_stride)));
-            });
-          };
-      auto by_layout = [&](auto has_residual_tag, auto hidden_tag) {
+      auto launch_s = [&](auto hidden_tag, auto res_tag, auto col_tag) {
+        queue.submit([&](sycl::handler& cgh) {
+          cgh.parallel_for(
+              sycl::nd_range<1>((num_vecs + wg - 1) / wg * wg, wg),
+              rms_norm_mx_quant_short_kernel<
+                  sycl_t,
+                  out_t,
+                  decltype(res_tag)::value,
+                  decltype(hidden_tag)::value,
+                  decltype(col_tag)::value>(
+                  out_ptr,
+                  residual_ptr,
+                  reinterpret_cast<const sycl_t*>(input.data_ptr()),
+                  reinterpret_cast<const sycl_t*>(weight.data_ptr()),
+                  scales_ptr,
+                  epsilon,
+                  static_cast<int>(num_tokens),
+                  static_cast<int>(input_stride)));
+        });
+      };
+      auto launch_res = [&](auto hidden_tag, auto res_tag) {
         if (is_scale_transposed) {
-          launch_short(has_residual_tag, hidden_tag, std::true_type{});
+          launch_s(hidden_tag, res_tag, std::true_type{});
         } else {
-          launch_short(has_residual_tag, hidden_tag, std::false_type{});
+          launch_s(hidden_tag, res_tag, std::false_type{});
         }
       };
-      auto by_hidden = [&](auto has_residual_tag) {
-        switch (hidden_size) {
-          case 32:
-            by_layout(has_residual_tag, std::integral_constant<int, 32>{});
-            break;
-          case 64:
-            by_layout(has_residual_tag, std::integral_constant<int, 64>{});
-            break;
-          case 128:
-            by_layout(has_residual_tag, std::integral_constant<int, 128>{});
-            break;
-          default:
-            by_layout(has_residual_tag, std::integral_constant<int, 256>{});
+      auto launch_short = [&](auto hidden_tag) {
+        if (residual.has_value()) {
+          launch_res(hidden_tag, std::true_type{});
+        } else {
+          launch_res(hidden_tag, std::false_type{});
         }
       };
-      if (residual.has_value()) {
-        by_hidden(std::true_type{});
-      } else {
-        by_hidden(std::false_type{});
+      switch (hidden_size) {
+        case 32:
+          launch_short(std::integral_constant<int, 32>{});
+          break;
+        case 64:
+          launch_short(std::integral_constant<int, 64>{});
+          break;
+        case 128:
+          launch_short(std::integral_constant<int, 128>{});
+          break;
+        default:
+          launch_short(std::integral_constant<int, 256>{});
       }
       return true;
     }
 
+    // Rows wider than 2 * VEC * 1024 fall back to the per-block kernel; a
+    // VPL = 4 variant is not worth its binary size for such rare widths.
     int vpl = 1;
-    while (vpl < 4 && hidden_size / (VEC * vpl) > 1024)
+    while (vpl < 2 && hidden_size / (VEC * vpl) > 1024)
       vpl *= 2;
     if (vpl == 1 && !residual.has_value() && num_tokens >= 128) vpl = 2;
     const int lanes = hidden_size / (VEC * vpl);
@@ -1200,19 +1192,17 @@ bool try_rms_norm_mx_quant(
     if (num_tokens == 0) return true;
     const int64_t wg_size = (lanes + 31) / 32 * 32;
 
-    auto launch = [&](auto has_residual_tag, auto vpl_tag, auto col_tag) {
-      constexpr bool has_residual = decltype(has_residual_tag)::value;
+    auto launch_c = [&](auto vpl_tag, auto res_tag, auto col_tag) {
       constexpr int VPL = decltype(vpl_tag)::value;
-      constexpr bool COL_MAJOR = decltype(col_tag)::value;
       queue.submit([&](sycl::handler& cgh) {
         cgh.parallel_for(
             sycl::nd_range<1>(num_tokens * wg_size, wg_size),
             rms_norm_mx_quant_kernel<
                 sycl_t,
                 out_t,
-                has_residual,
+                decltype(res_tag)::value,
                 VPL,
-                COL_MAJOR>(
+                decltype(col_tag)::value>(
                 out_ptr,
                 residual_ptr,
                 reinterpret_cast<const sycl_t*>(input.data_ptr()),
@@ -1224,26 +1214,24 @@ bool try_rms_norm_mx_quant(
                 static_cast<int>(num_tokens)));
       });
     };
-    auto dispatch_vpl = [&](auto has_residual_tag, auto col_tag) {
-      if (vpl == 1) {
-        launch(has_residual_tag, std::integral_constant<int, 1>{}, col_tag);
-      } else if (vpl == 2) {
-        launch(has_residual_tag, std::integral_constant<int, 2>{}, col_tag);
-      } else {
-        launch(has_residual_tag, std::integral_constant<int, 4>{}, col_tag);
-      }
-    };
-    auto dispatch = [&](auto has_residual_tag) {
+    auto launch = [&](auto vpl_tag, auto res_tag) {
       if (is_scale_transposed) {
-        dispatch_vpl(has_residual_tag, std::true_type{});
+        launch_c(vpl_tag, res_tag, std::true_type{});
       } else {
-        dispatch_vpl(has_residual_tag, std::false_type{});
+        launch_c(vpl_tag, res_tag, std::false_type{});
       }
     };
-    if (residual.has_value()) {
-      dispatch(std::true_type{});
+    auto with_res = [&](auto vpl_tag) {
+      if (residual.has_value()) {
+        launch(vpl_tag, std::true_type{});
+      } else {
+        launch(vpl_tag, std::false_type{});
+      }
+    };
+    if (vpl == 1) {
+      with_res(std::integral_constant<int, 1>{});
     } else {
-      dispatch(std::false_type{});
+      with_res(std::integral_constant<int, 2>{});
     }
     return true;
   }
@@ -1299,18 +1287,21 @@ void call_rms_norm_per_block_quant_kernel(
   const int eu_count = static_cast<int>(
       queue.get_device().get_info<sycl::info::device::max_compute_units>());
 
-  auto launch = [&](auto has_residual_tag, auto ue8m0_tag, auto cpt_tag) {
-    constexpr bool has_residual = decltype(has_residual_tag)::value;
-    constexpr bool ue8m0 = decltype(ue8m0_tag)::value;
-    constexpr int CPT = decltype(cpt_tag)::value;
+  // The int8 entry point always passes scale_ue8m0 = false.
+  TORCH_CHECK(
+      !(scale_ue8m0 && std::is_same_v<out_t, int8_t>),
+      "scale_ue8m0 is not supported for int8 output");
+  sycl_t* residual_ptr =
+      residual.has_value() ? (sycl_t*)residual->data_ptr<scalar_t>() : nullptr;
+
+  auto launch_res = [&](auto cpt_tag, auto res_tag) {
+    // Wider per-thread tiles are only specialised for 16-bit activations;
+    // fp32 input keeps one chunk per thread (binary size).
+    constexpr int CPT = sizeof(scalar_t) != 2 ? 1 : decltype(cpt_tag)::value;
     // Only the variance pass reduces over the group; the quantized store loop
     // reduces within a sub-group, so it uses the barrier-free sizing rule.
     const int64_t block_size = fused_norm_quant_block_size(
         num_tokens, eu_count, num_chunks / CPT, 1, false);
-    sycl_t* residual_ptr = nullptr;
-    if constexpr (has_residual) {
-      residual_ptr = (sycl_t*)residual->data_ptr<scalar_t>();
-    }
     queue.submit([&](sycl::handler& cgh) {
       sycl::local_accessor<sycl_t, 1> row_smem(
           sycl::range<1>(hidden_size), cgh);
@@ -1319,8 +1310,7 @@ void call_rms_norm_per_block_quant_kernel(
           rms_norm_per_block_quant_kernel<
               sycl_t,
               out_t,
-              has_residual,
-              ue8m0,
+              decltype(res_tag)::value,
               CPT>(
               out_ptr,
               residual_ptr,
@@ -1334,29 +1324,23 @@ void call_rms_norm_per_block_quant_kernel(
               scale_stride_token,
               scale_stride_group,
               input_stride,
+              scale_ue8m0,
               row_smem));
     });
   };
-
-  auto dispatch = [&](auto has_residual_tag, auto ue8m0_tag) {
-    dispatch_quant_chunks(
-        num_tokens, num_chunks, chunks_per_group, eu_count, [&](auto cpt_tag) {
-          launch(has_residual_tag, ue8m0_tag, cpt_tag);
-        });
+  auto launch = [&](auto cpt_tag) {
+    if (residual_ptr != nullptr) {
+      launch_res(cpt_tag, std::true_type{});
+    } else {
+      launch_res(cpt_tag, std::false_type{});
+    }
   };
 
-  if (residual.has_value()) {
-    if (scale_ue8m0) {
-      dispatch(std::true_type{}, std::true_type{});
-    } else {
-      dispatch(std::true_type{}, std::false_type{});
-    }
+  if constexpr (sizeof(scalar_t) != 2) {
+    launch(std::integral_constant<int, 1>{});
   } else {
-    if (scale_ue8m0) {
-      dispatch(std::false_type{}, std::true_type{});
-    } else {
-      dispatch(std::false_type{}, std::false_type{});
-    }
+    dispatch_quant_chunks(
+        num_tokens, num_chunks, chunks_per_group, eu_count, launch);
   }
 }
 
@@ -1495,7 +1479,6 @@ void call_rms_norm_mxfp4_quant_kernel(
   const int64_t num_tokens = input.numel() / hidden_size;
   const int num_groups = hidden_size / group_size;
   const int num_vec = hidden_size / static_cast<int>(16 / sizeof(sycl_t));
-  const int block_size = fused_quant_block_size(num_vec, 4, true);
 
   const int64_t scale_stride_token =
       is_scale_transposed ? 1 : static_cast<int64_t>(num_groups);
@@ -1518,6 +1501,10 @@ void call_rms_norm_mxfp4_quant_kernel(
   }
 
   auto& queue = vllm::xpu::vllmGetQueue();
+  const int eu_count = static_cast<int>(
+      queue.get_device().get_info<sycl::info::device::max_compute_units>());
+  const int64_t block_size =
+      fused_norm_quant_block_size(num_tokens, eu_count, num_vec, 4, true);
 
   auto launch = [&](auto has_residual_tag) {
     constexpr bool has_residual = decltype(has_residual_tag)::value;

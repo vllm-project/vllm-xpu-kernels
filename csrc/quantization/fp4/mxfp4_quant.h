@@ -485,27 +485,32 @@ inline float mxfp4_quant_group32(
   return y_s;
 }
 
-template <typename scalar_t, typename scale_t>
+// The scale dtype (float or e8m0) is a uniform runtime switch at the final
+// store (binary size).
+template <typename scalar_t>
 class per_token_group_quant_mxfp4_flat_kernel {
  private:
   uint8_t* __restrict__ out;
-  scale_t* __restrict__ scale;
+  void* __restrict__ scale;
   scalar_t const* __restrict__ input;
   const int64_t num_groups;
   float eps;
+  const bool scale_e8m0;
 
  public:
   per_token_group_quant_mxfp4_flat_kernel(
       uint8_t* out_,
-      scale_t* scale_,
+      void* scale_,
       scalar_t const* input_,
       const int64_t num_groups_,
-      float eps_)
+      float eps_,
+      const bool scale_e8m0_)
       : out(out_),
         scale(scale_),
         input(input_),
         num_groups(num_groups_),
-        eps(eps_) {}
+        eps(eps_),
+        scale_e8m0(scale_e8m0_) {}
 
   void operator()
       [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
@@ -521,21 +526,23 @@ class per_token_group_quant_mxfp4_flat_kernel {
       return;
     }
     reinterpret_cast<vec_n_t<uint32_t, 4>*>(out)[g] = o;
-    if constexpr (std::is_same_v<scale_t, float>) {
-      scale[g] = y_s;
+    if (scale_e8m0) {
+      static_cast<uint8_t*>(scale)[g] = MoEScaleLayout::encode(y_s);
     } else {
-      scale[g] = MoEScaleLayout::encode(y_s);
+      static_cast<float*>(scale)[g] = y_s;
     }
   }
 };
 
-template <typename scalar_t, typename scale_t, bool COL_MAJOR>
+// The scale-tile write-out order (col_major) and the scale dtype (float or
+// e8m0, staged as float in SLM) are uniform runtime switches (binary size).
+template <typename scalar_t>
 class per_token_group_quant_mxfp4_tile_kernel {
  private:
   uint8_t* __restrict__ out;
-  scale_t* __restrict__ scale;
+  void* __restrict__ scale;
   scalar_t const* __restrict__ input;
-  sycl::local_accessor<scale_t, 1> tile;
+  sycl::local_accessor<float, 1> tile;
   const int groups_per_row;
   const int groups_per_wg;
   float eps;
@@ -543,28 +550,24 @@ class per_token_group_quant_mxfp4_tile_kernel {
   const int rows_per_wg;
   const int64_t scale_stride_token;
   const int64_t scale_stride_group;
-
-  static scale_t encode(float y_s) {
-    if constexpr (std::is_same_v<scale_t, float>) {
-      return y_s;
-    } else {
-      return MoEScaleLayout::encode(y_s);
-    }
-  }
+  const bool col_major;
+  const bool scale_e8m0;
 
  public:
   per_token_group_quant_mxfp4_tile_kernel(
       uint8_t* out_,
-      scale_t* scale_,
+      void* scale_,
       scalar_t const* input_,
-      sycl::local_accessor<scale_t, 1> tile_,
+      sycl::local_accessor<float, 1> tile_,
       const int groups_per_row_,
       const int groups_per_wg_,
       float eps_,
       const int num_rows_,
       const int rows_per_wg_,
       const int64_t scale_stride_token_,
-      const int64_t scale_stride_group_)
+      const int64_t scale_stride_group_,
+      const bool col_major_,
+      const bool scale_e8m0_)
       : out(out_),
         scale(scale_),
         input(input_),
@@ -575,7 +578,9 @@ class per_token_group_quant_mxfp4_tile_kernel {
         num_rows(num_rows_),
         rows_per_wg(rows_per_wg_),
         scale_stride_token(scale_stride_token_),
-        scale_stride_group(scale_stride_group_) {}
+        scale_stride_group(scale_stride_group_),
+        col_major(col_major_),
+        scale_e8m0(scale_e8m0_) {}
 
   void operator()
       [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<2> item) const {
@@ -603,24 +608,29 @@ class per_token_group_quant_mxfp4_tile_kernel {
           mxfp4_quant_group32<scalar_t>(vin + off, active, eps, o);
       if (active) {
         *reinterpret_cast<vec_n_t<uint32_t, 4>*>(vout + off) = o;
-        tile[gi] = encode(y_s);
+        tile[gi] = y_s;
       }
     }
 
     sycl::group_barrier(item.get_group());
     for (int idx = tid; idx < tile_groups; idx += local_range) {
       int r, k;
-      if constexpr (COL_MAJOR) {
+      if (col_major) {
         k = idx / rows;
         r = idx - k * rows;
       } else {
         r = idx / groups_per_wg;
         k = idx - r * groups_per_wg;
       }
-      scale
-          [static_cast<int64_t>(row_base + r) * scale_stride_token +
-           static_cast<int64_t>(k_base + k) * scale_stride_group] =
-              tile[r * groups_per_wg + k];
+      const int64_t dst =
+          static_cast<int64_t>(row_base + r) * scale_stride_token +
+          static_cast<int64_t>(k_base + k) * scale_stride_group;
+      const float y_s = tile[r * groups_per_wg + k];
+      if (scale_e8m0) {
+        static_cast<uint8_t*>(scale)[dst] = MoEScaleLayout::encode(y_s);
+      } else {
+        static_cast<float*>(scale)[dst] = y_s;
+      }
     }
   }
 };
