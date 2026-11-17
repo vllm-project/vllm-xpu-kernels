@@ -1308,7 +1308,11 @@ void per_token_group_quant_fp8(
     return;
   }
 
-  if (use_vec) {
+  // The vec kernel reduces a group within one 32-lane sub-group, so groups
+  // spanning more lanes (e.g. fp32 group 256 at CPT == 1) take the generic
+  // kernel below.
+  constexpr int kVecMaxLanesPerGroup = 32;
+  const bool vec_launched = use_vec && [&] {
     const int num_groups_per_row = hidden / group_size;
     const int chunks_per_group = group_size / vec_width;
     const int num_chunks = hidden / vec_width;
@@ -1328,6 +1332,7 @@ void per_token_group_quant_fp8(
         break;
       }
     }
+    if (chunks_per_group / cpt > kVecMaxLanesPerGroup) return false;
     const int threads_per_row = num_chunks / cpt;
     int wg = std::min<int>(((threads_per_row + 31) / 32) * 32, 1024);
     if (wg < 32) wg = 32;
@@ -1377,8 +1382,9 @@ void per_token_group_quant_fp8(
                 }
               });
         });
-    return;
-  }
+    return true;
+  }();
+  if (vec_launched) return;
 
   sycl::range<1> grid(num_blocks);
   sycl::range<1> block(num_threads);

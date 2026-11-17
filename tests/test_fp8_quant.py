@@ -386,6 +386,46 @@ def test_per_block_fp8_quant(
                 num_tokens_block_quant, 4)
 
 
+# Regression test: groups wider than one 32-lane sub-group in the vectorized
+# kernel (e.g. fp32 group 256 at one chunk per lane needs 64 lanes) must still
+# reduce across the whole group. 8192 tokens saturates the device.
+@pytest.mark.parametrize("num_tokens", [3, 8192])
+@pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
+@pytest.mark.parametrize("group_size", [256, 512])
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES)
+@torch.inference_mode()
+def test_per_token_group_quant_fp8_wide_group(num_tokens: int,
+                                              dtype: torch.dtype,
+                                              group_size: int,
+                                              fp8_dtype: torch.dtype) -> None:
+    seed_everything(0)
+    hidden = 1024
+    x = torch.randn(num_tokens, hidden, dtype=dtype, device="xpu") * 4
+    # Put each group's absmax in its last element so a partial reduction
+    # gives a wrong scale.
+    x.view(num_tokens, -1, group_size)[..., -1] = 64.0
+
+    fp8_max = torch.finfo(fp8_dtype).max
+    xg = x.float().view(num_tokens, -1, group_size)
+    ref_scales = (xg.abs().amax(dim=-1).clamp(min=1e-10) / fp8_max)
+    ref_out = (xg / ref_scales.unsqueeze(-1)).clamp(
+        -fp8_max, fp8_max).to(fp8_dtype).view(num_tokens, hidden)
+
+    ops_out, ops_scales = per_token_group_quant_fp8(x,
+                                                    group_size=group_size,
+                                                    dtype=fp8_dtype,
+                                                    use_ue8m0=False)
+
+    torch.testing.assert_close(ops_scales.float(),
+                               ref_scales,
+                               atol=0,
+                               rtol=1e-5)
+    # fp32 -> e5m2 may round a few ties differently from torch.
+    assert_close_percentage(ops_out.float(),
+                            ref_out.float(),
+                            mismatch_threshold=0.01)
+
+
 @pytest.mark.parametrize("num_tokens_block_quant", NUM_TOKENS_BLOCK_QUANT)
 @pytest.mark.parametrize("hidden_size_block_quant", HIDDEN_SIZES_BLOCK_QUANT)
 @pytest.mark.parametrize("mxfp8_hp_dtypes", MXFP8_HP_DTYPES)
