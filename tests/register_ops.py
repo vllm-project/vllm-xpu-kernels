@@ -689,6 +689,22 @@ def swap_blocks_batch(
     torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
 
 
+def xpu_memcpy_batch_async(dst_ptrs: torch.Tensor,
+                           src_ptrs: torch.Tensor,
+                           sizes: torch.Tensor,
+                           stream: Optional[torch.xpu.Stream] = None) -> None:
+    """Enqueue len(sizes) raw-pointer copies on stream without staging.
+
+    dst_ptrs/src_ptrs/sizes are contiguous CPU uint64 tensors. Host buffers
+    are read/written in place when the stream executes the copies."""
+    if stream is None:
+        stream = torch.xpu.current_stream()
+    torch.ops._C.xpu_memcpy_batch_async(dst_ptrs.data_ptr(),
+                                        src_ptrs.data_ptr(), sizes.data_ptr(),
+                                        sizes.numel(), stream.stream_id,
+                                        stream.device_index)
+
+
 def xpu_host_register(ptr: int, n_bytes: int) -> bool:
     """Page-lock a host range and import it into the device context so
     transfers use direct DMA. Intended for host memory that cannot come from

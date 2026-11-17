@@ -342,6 +342,14 @@ void xpu_memcpy_sync(
     int64_t kind,
     int64_t device = -1);
 
+void xpu_memcpy_batch_async(
+    int64_t dst_ptrs,
+    int64_t src_ptrs,
+    int64_t sizes,
+    int64_t count,
+    int64_t stream_id,
+    int64_t device_index);
+
 bool xpu_host_register(int64_t ptr, int64_t n_bytes);
 
 bool xpu_host_unregister(int64_t ptr);

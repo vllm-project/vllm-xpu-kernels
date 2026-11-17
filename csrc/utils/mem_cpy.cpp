@@ -301,6 +301,49 @@ enum class MemcpyKind : int64_t {
   DeviceToDevice = 2,
 };
 
+// XPU counterpart of cuMemcpyBatchAsync: enqueues `count` independent
+// (dst, src, size) copies on the given stream without staging or waiting.
+// Unlike swap_blocks_batch, host memory is used in place, so the caller must
+// keep it alive and unmodified until the stream reaches the copies. Register
+// host ranges with xpu_host_register for direct DMA.
+void xpu_memcpy_batch_async(
+    int64_t dst_ptrs,
+    int64_t src_ptrs,
+    int64_t sizes,
+    int64_t count,
+    int64_t stream_id,
+    int64_t device_index) {
+  TORCH_CHECK(count >= 0, "count must be non-negative");
+  if (count == 0) {
+    return;
+  }
+  TORCH_CHECK(
+      dst_ptrs != 0 && src_ptrs != 0 && sizes != 0,
+      "dst_ptrs, src_ptrs and sizes must be non-null");
+
+  auto stream = c10::xpu::XPUStream::unpack3(
+      static_cast<c10::StreamId>(stream_id),
+      static_cast<c10::DeviceIndex>(device_index),
+      c10::DeviceType::XPU);
+  sycl::queue& queue = stream.queue();
+
+  const auto* dsts =
+      reinterpret_cast<const uint64_t*>(static_cast<uintptr_t>(dst_ptrs));
+  const auto* srcs =
+      reinterpret_cast<const uint64_t*>(static_cast<uintptr_t>(src_ptrs));
+  const auto* lens =
+      reinterpret_cast<const uint64_t*>(static_cast<uintptr_t>(sizes));
+
+  for (int64_t i = 0; i < count; i++) {
+    if (lens[i] == 0) continue;
+    syclex::memcpy(
+        queue,
+        reinterpret_cast<void*>(dsts[i]),
+        reinterpret_cast<const void*>(srcs[i]),
+        static_cast<size_t>(lens[i]));
+  }
+}
+
 void xpu_memcpy_sync(
     int64_t dst_ptr,
     int64_t src_ptr,

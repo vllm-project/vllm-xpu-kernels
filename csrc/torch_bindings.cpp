@@ -276,6 +276,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int device=-1) -> ()");
   ops.impl("xpu_memcpy_sync", &xpu_memcpy_sync);
 
+  // Batched async raw-pointer memcpy, the XPU counterpart of
+  // cuMemcpyBatchAsync. dst_ptrs/src_ptrs/sizes are addresses of host arrays
+  // of `count` uint64 entries. Copies are enqueued on the stream identified by
+  // (stream_id, device_index) without staging or synchronization.
+  ops.def(
+      "xpu_memcpy_batch_async(int dst_ptrs, int src_ptrs, int sizes, "
+      "int count, int stream_id, int device_index) -> ()");
+  ops.impl("xpu_memcpy_batch_async", &xpu_memcpy_batch_async);
+
   // Page-lock an existing host range and import it into the device context so
   // transfers can use direct DMA instead of staged/synchronous copies. Host
   // memory outside the caching host allocator (e.g. a shared mmap region) has
