@@ -34,14 +34,6 @@ envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'tools',
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
 
-def is_sccache_available() -> bool:
-    return which("sccache") is not None
-
-
-def is_ccache_available() -> bool:
-    return which("ccache") is not None
-
-
 def is_ninja_available() -> bool:
     return which("ninja") is not None
 
@@ -163,16 +155,11 @@ class cmake_build_ext(build_ext):
         if verbose:
             cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
 
-        if is_sccache_available():
-            cmake_args += [
-                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
-                '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
-            ]
-        elif is_ccache_available():
-            cmake_args += [
-                '-DCMAKE_C_COMPILER_LAUNCHER=ccache',
-                '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
-            ]
+        compiler_cache = envs.get_compiler_cache()
+        cmake_args += [
+            f'-DCMAKE_C_COMPILER_LAUNCHER={compiler_cache}',
+            f'-DCMAKE_CXX_COMPILER_LAUNCHER={compiler_cache}',
+        ]
 
         # Pass the python executable to cmake so it can find an exact
         # match.
