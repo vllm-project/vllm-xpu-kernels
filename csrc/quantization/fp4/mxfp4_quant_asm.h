@@ -32,14 +32,14 @@ mxfp4_scale_clamp_asm<at::Half>(at::Half const& src, float inv_scale) {
   sycl::half a = sycl::bit_cast<sycl::half>(src);
   float dst;
   asm("{\n"
-      ".decl IN_HF   v_type=G type=HF num_elts=16 alias=<%1,0>\n"
-      ".decl OUT_F   v_type=G type=F  num_elts=16 alias=<%0,0>\n"
-      ".decl SCALE_F v_type=G type=F  num_elts=16 alias=<%2,0>\n"
-      ".decl TMP_F   v_type=G type=F  num_elts=16 align=32\n"
-      "mov  (M1_NM, 16) TMP_F(0,0)<1>  IN_HF(0,0)<1;1,0>\n"
-      "mul  (M1_NM, 16) TMP_F(0,0)<1>  TMP_F(0,0)<1;1,0>  SCALE_F(0,0)<0;1,0>\n"
-      "min  (M1_NM, 16) TMP_F(0,0)<1>  TMP_F(0,0)<1;1,0>  0x40C00000:f\n"
-      "max  (M1_NM, 16) OUT_F(0,0)<1>  TMP_F(0,0)<1;1,0>  0xC0C00000:f\n"
+      ".decl IN_HF   v_type=G type=HF num_elts=32 alias=<%1,0>\n"
+      ".decl OUT_F   v_type=G type=F  num_elts=32 alias=<%0,0>\n"
+      ".decl SCALE_F v_type=G type=F  num_elts=32 alias=<%2,0>\n"
+      ".decl TMP_F   v_type=G type=F  num_elts=32 align=32\n"
+      "mov  (M1_NM, 32) TMP_F(0,0)<1>  IN_HF(0,0)<1;1,0>\n"
+      "mul  (M1_NM, 32) TMP_F(0,0)<1>  TMP_F(0,0)<1;1,0>  SCALE_F(0,0)<0;1,0>\n"
+      "min  (M1_NM, 32) TMP_F(0,0)<1>  TMP_F(0,0)<1;1,0>  0x40C00000:f\n"
+      "max  (M1_NM, 32) OUT_F(0,0)<1>  TMP_F(0,0)<1;1,0>  0xC0C00000:f\n"
       "}\n"
       : "=rw"(dst)
       : "rw"(a), "rw"(inv_scale));
@@ -54,14 +54,14 @@ mxfp4_scale_clamp_asm<at::BFloat16>(at::BFloat16 const& src, float inv_scale) {
       sycl::bit_cast<sycl::ext::oneapi::bfloat16>(src);
   float dst;
   asm("{\n"
-      ".decl IN_BF   v_type=G type=BF num_elts=16 alias=<%1,0>\n"
-      ".decl OUT_F   v_type=G type=F  num_elts=16 alias=<%0,0>\n"
-      ".decl SCALE_F v_type=G type=F  num_elts=16 alias=<%2,0>\n"
-      ".decl TMP_F   v_type=G type=F  num_elts=16 align=32\n"
-      "mov  (M1_NM, 16) TMP_F(0,0)<1>  IN_BF(0,0)<1;1,0>\n"
-      "mul  (M1_NM, 16) TMP_F(0,0)<1>  TMP_F(0,0)<1;1,0>  SCALE_F(0,0)<0;1,0>\n"
-      "min  (M1_NM, 16) TMP_F(0,0)<1>  TMP_F(0,0)<1;1,0>  0x40C00000:f\n"
-      "max  (M1_NM, 16) OUT_F(0,0)<1>  TMP_F(0,0)<1;1,0>  0xC0C00000:f\n"
+      ".decl IN_BF   v_type=G type=BF num_elts=32 alias=<%1,0>\n"
+      ".decl OUT_F   v_type=G type=F  num_elts=32 alias=<%0,0>\n"
+      ".decl SCALE_F v_type=G type=F  num_elts=32 alias=<%2,0>\n"
+      ".decl TMP_F   v_type=G type=F  num_elts=32 align=32\n"
+      "mov  (M1_NM, 32) TMP_F(0,0)<1>  IN_BF(0,0)<1;1,0>\n"
+      "mul  (M1_NM, 32) TMP_F(0,0)<1>  TMP_F(0,0)<1;1,0>  SCALE_F(0,0)<0;1,0>\n"
+      "min  (M1_NM, 32) TMP_F(0,0)<1>  TMP_F(0,0)<1;1,0>  0x40C00000:f\n"
+      "max  (M1_NM, 32) OUT_F(0,0)<1>  TMP_F(0,0)<1;1,0>  0xC0C00000:f\n"
       "}\n"
       : "=rw"(dst)
       : "rw"(a), "rw"(inv_scale));
@@ -73,13 +73,13 @@ template <>
 inline float mxfp4_scale_clamp_asm<float>(float const& src, float inv_scale) {
   float dst;
   asm("{\n"
-      ".decl IN_F    v_type=G type=F num_elts=16 alias=<%1,0>\n"
-      ".decl OUT_F   v_type=G type=F num_elts=16 alias=<%0,0>\n"
-      ".decl SCALE_F v_type=G type=F num_elts=16 alias=<%2,0>\n"
-      ".decl TMP_F   v_type=G type=F num_elts=16 align=32\n"
-      "mul  (M1_NM, 16) TMP_F(0,0)<1>  IN_F(0,0)<1;1,0>   SCALE_F(0,0)<0;1,0>\n"
-      "min  (M1_NM, 16) TMP_F(0,0)<1>  TMP_F(0,0)<1;1,0>  0x40C00000:f\n"
-      "max  (M1_NM, 16) OUT_F(0,0)<1>  TMP_F(0,0)<1;1,0>  0xC0C00000:f\n"
+      ".decl IN_F    v_type=G type=F num_elts=32 alias=<%1,0>\n"
+      ".decl OUT_F   v_type=G type=F num_elts=32 alias=<%0,0>\n"
+      ".decl SCALE_F v_type=G type=F num_elts=32 alias=<%2,0>\n"
+      ".decl TMP_F   v_type=G type=F num_elts=32 align=32\n"
+      "mul  (M1_NM, 32) TMP_F(0,0)<1>  IN_F(0,0)<1;1,0>   SCALE_F(0,0)<0;1,0>\n"
+      "min  (M1_NM, 32) TMP_F(0,0)<1>  TMP_F(0,0)<1;1,0>  0x40C00000:f\n"
+      "max  (M1_NM, 32) OUT_F(0,0)<1>  TMP_F(0,0)<1;1,0>  0xC0C00000:f\n"
       "}\n"
       : "=rw"(dst)
       : "rw"(src), "rw"(inv_scale));

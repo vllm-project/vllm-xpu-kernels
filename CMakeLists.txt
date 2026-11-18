@@ -466,26 +466,6 @@ if(BUILD_SYCL_TLA_KERNELS)
     # branch on it (mirrors intel_gpu_cri DPC++ target above).
     list(APPEND SYCL_TLA_KERNELS_COMPILE_FLAGS
          "-D__SYCL_TARGET_INTEL_GPU_CRI__")
-    # The intel_gpu_cri SYCL architecture enumerator only exists on CRI-enabled
-    # oneAPI toolchains. Detect it so is_xe3p_arch() (csrc/utils.h) can
-    # reference it when available and fall back to intel_gpu_nvl_p otherwise.
-    get_filename_component(_icpx_bindir "${CMAKE_CXX_COMPILER}" DIRECTORY)
-    set(_sycl_arch_def
-        "${_icpx_bindir}/../include/sycl/ext/oneapi/experimental/device_architecture.def"
-    )
-    if(EXISTS "${_sycl_arch_def}")
-      file(STRINGS "${_sycl_arch_def}" _cri_arch_lines
-           REGEX "intel_gpu_cri[^_]")
-      if(_cri_arch_lines)
-        message(STATUS "Toolchain supports intel_gpu_cri architecture")
-        list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_HAS_INTEL_GPU_CRI)
-      else()
-        message(
-          STATUS
-            "Toolchain lacks intel_gpu_cri; is_xe3p_arch() will use intel_gpu_nvl_p only"
-        )
-      endif()
-    endif()
     # Xe3p can use 512-GRF per thread on newer toolchains, but pin to 256-GRF
     # for now so the XE3 kernels build consistently across oneAPI releases.
     set(VLLM_XPU_XE3P_GRF_SIZE 256)
@@ -501,6 +481,30 @@ if(BUILD_SYCL_TLA_KERNELS)
   endif()
   list(APPEND VLLM_GPU_COMPILE_FLAGS ${SYCL_TLA_COMPILE_OPTIONS})
 
+endif()
+
+# Probe outside the TLA block: the quant asm dispatch in _C (is_xe3p_arch) needs
+# this define even when the SYCL-TLA kernels are disabled.
+if(VLLM_XPU_ENABLE_XE3P)
+  # The intel_gpu_cri SYCL architecture enumerator only exists on CRI-enabled
+  # oneAPI toolchains. Detect it so is_xe3p_arch() (csrc/utils.h) can reference
+  # it when available and fall back to intel_gpu_nvl_p otherwise.
+  get_filename_component(_icpx_bindir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  set(_sycl_arch_def
+      "${_icpx_bindir}/../include/sycl/ext/oneapi/experimental/device_architecture.def"
+  )
+  if(EXISTS "${_sycl_arch_def}")
+    file(STRINGS "${_sycl_arch_def}" _cri_arch_lines REGEX "intel_gpu_cri[^_]")
+    if(_cri_arch_lines)
+      message(STATUS "Toolchain supports intel_gpu_cri architecture")
+      list(APPEND VLLM_GPU_COMPILE_FLAGS -DVLLM_XPU_HAS_INTEL_GPU_CRI)
+    else()
+      message(
+        STATUS
+          "Toolchain lacks intel_gpu_cri; is_xe3p_arch() will use intel_gpu_nvl_p only"
+      )
+    endif()
+  endif()
 endif()
 
 # Feature compile defines — these guard op registrations and interface code so

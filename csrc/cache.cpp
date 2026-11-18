@@ -296,7 +296,8 @@ class reshape_and_cache_flash_kernel {
         k_scale_(k_scale),
         v_scale_(v_scale) {}
 
-  void operator()(const sycl::nd_item<1>& item) const {
+  void operator()
+      [[sycl::reqd_sub_group_size(32)]] (const sycl::nd_item<1>& item) const {
     int64_t group_idx = item.get_group(0);
     int64_t local_idx = item.get_local_id(0);
     int local_range = item.get_local_range(0);

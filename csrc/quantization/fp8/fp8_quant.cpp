@@ -179,7 +179,8 @@ class scaled_fp8_quant_kernel_strided_group_shape_vec {
         scale_stride_j(scale_stride_j_),
         col_tiles(col_tiles_) {}
 
-  void operator()(sycl::nd_item<1> item) const {
+  void operator()
+      [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
     const int64_t gid = item.get_group(0);
     const int64_t row_blocks = item.get_group_range(0) / col_tiles;
     const int ct = ELEM_SCALE ? static_cast<int>(gid % col_tiles) : 0;

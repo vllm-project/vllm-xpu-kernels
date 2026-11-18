@@ -2,16 +2,17 @@
 //
 // Runtime dispatcher for quant ops that have an Xe3p hand-written asm path.
 //
-// The asm implementation is only linked/available on Xe3p -capable builds
+// The asm implementation is only linked/available on Xe3p-capable builds
 // (VLLM_QUANT_ASM_AVAILABLE). When present, it is taken by default and only
 // when BOTH:
-//   1. the current device is one of the archs libquant_asm_xe_3.so was
-//   AOT-built
-//      for (Xe3p arch devices), and
+//   1. the tensor's device is one of the archs libquant_asm_xe_3.so was
+//      AOT-built for (Xe3p arch devices), and
 //   2. the env var VLLM_XPU_DISABLE_QUANT_ASM is NOT set to 1 (i.e. the asm
-//   path
-//      is on by default and can be turned off to fall back to the _C impl).
+//      path is on by default and can be turned off to fall back to the _C
+//      impl).
 
+#include <array>
+#include <atomic>
 #include <cstdlib>
 #include <optional>
 #include <string>
@@ -229,17 +230,23 @@ namespace {
 
 #ifdef VLLM_QUANT_ASM_AVAILABLE
 bool use_quant_asm(const at::Device& device) {
-  static const bool enabled = [&] {
-    if (!vllm::xpu::is_xe3p_arch(
-            static_cast<at::DeviceIndex>(device.index()))) {
-      return false;
-    }
+  // Read on every call so the fallback can be toggled at runtime.
+  const char* v = std::getenv("VLLM_XPU_DISABLE_QUANT_ASM");
+  if (v != nullptr && v[0] == '1') return false;
 
-    const char* v = std::getenv("VLLM_XPU_DISABLE_QUANT_ASM");
-    if (v == nullptr || v[0] != '1') return true;
-    return false;
-  }();
-  return enabled;
+  const at::DeviceIndex index =
+      device.has_index() ? device.index() : c10::xpu::current_device();
+  // The device architecture never changes, so cache the answer per device:
+  // 0 = unknown, 1 = fallback, 2 = asm.
+  constexpr int kMaxDevices = 64;
+  static std::array<std::atomic<int8_t>, kMaxDevices> cache{};
+  if (index < 0 || index >= kMaxDevices) return vllm::xpu::is_xe3p_arch(index);
+  int8_t state = cache[index].load(std::memory_order_relaxed);
+  if (state == 0) {
+    state = vllm::xpu::is_xe3p_arch(index) ? 2 : 1;
+    cache[index].store(state, std::memory_order_relaxed);
+  }
+  return state == 2;
 }
 #endif  // VLLM_QUANT_ASM_AVAILABLE
 
