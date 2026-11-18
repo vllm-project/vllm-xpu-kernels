@@ -14,6 +14,49 @@
   #include "xe_2/chunk_gated_delta_rule_xe2.h"
 #endif
 
+namespace {
+
+struct PrefillCheckpointPtrs {
+  const int* offsets = nullptr;
+  const int* state_indices = nullptr;
+
+  bool enabled() const { return offsets != nullptr; }
+};
+
+// Optional internal prefill checkpoints (vLLM `mamba_cache_mode="align"`):
+// for each non-spec row, `checkpoint_offsets[row]` (0 = none) is a
+// chunk-aligned offset into the row's query, and the conv window / SSM state
+// after that many tokens are written to cache slot
+// `checkpoint_state_indices[row]` (<= 0 = none).
+PrefillCheckpointPtrs get_prefill_checkpoint_ptrs(
+    const std::optional<torch::Tensor>& checkpoint_offsets,
+    const std::optional<torch::Tensor>& checkpoint_state_indices,
+    const int64_t batch_size) {
+  TORCH_CHECK(
+      checkpoint_offsets.has_value() == checkpoint_state_indices.has_value(),
+      "checkpoint_offsets and checkpoint_state_indices must be given together");
+  if (!checkpoint_offsets.has_value()) {
+    return {};
+  }
+  for (const torch::Tensor* t :
+       {&checkpoint_offsets.value(), &checkpoint_state_indices.value()}) {
+    TORCH_CHECK(
+        t->scalar_type() == at::kInt, "checkpoint tensors must be int32");
+    TORCH_CHECK(t->is_contiguous(), "checkpoint tensors must be contiguous");
+    TORCH_CHECK(
+        t->dim() == 1 && t->size(0) == batch_size,
+        "checkpoint tensors must have shape [batch_size]");
+  }
+#ifndef VLLM_XPU_ENABLE_XE2
+  TORCH_CHECK(false, "GDN prefill checkpoints require the XE2 kernels");
+#endif
+  return {
+      reinterpret_cast<const int*>(checkpoint_offsets->data_ptr()),
+      reinterpret_cast<const int*>(checkpoint_state_indices->data_ptr())};
+}
+
+}  // namespace
+
 // Conv stage of GatedDeltaNet linear attention, spec-decode path. Runs the
 // causal conv1d (plus activation) for the spec-decode tokens, scatters z,
 // advances the per-seq conv cache, and returns the intermediate
@@ -258,7 +301,9 @@ std::vector<torch::Tensor> causal_conv1d_non_spec(
     const torch::Tensor& non_spec_state_indices_tensor,
     const int64_t num_actual_tokens,
     const int64_t tp_size,
-    const bool reorder_input) {
+    const bool reorder_input,
+    const std::optional<torch::Tensor>& checkpoint_offsets,
+    const std::optional<torch::Tensor>& checkpoint_state_indices) {
   TORCH_CHECK(z.is_contiguous(), "z must be contiguous");
   TORCH_CHECK(
       projected_states_qkvz.is_contiguous(),
@@ -392,6 +437,10 @@ std::vector<torch::Tensor> causal_conv1d_non_spec(
   // Rows whose state index is <= pad_slot_id are padding: vLLM marks them
   // with NULL_BLOCK_ID (0) or PAD_SLOT_ID (-1).
   const int pad_slot_id = 0;
+  const PrefillCheckpointPtrs checkpoint = get_prefill_checkpoint_ptrs(
+      checkpoint_offsets,
+      checkpoint_state_indices,
+      non_spec_query_start_loc.size(0) - 1);
 
   std::optional<torch::Tensor> empty_tensor{std::nullopt};
 
@@ -498,7 +547,9 @@ std::vector<torch::Tensor> causal_conv1d_non_spec(
           reorder_input,
           token_indx_ptr,
           non_spec_token,
-          fuse_l2norm);
+          fuse_l2norm,
+          checkpoint.offsets,
+          checkpoint.state_indices);
     } else {
       gdn::chunk_causal_conv1d_xe2(
           queue,
@@ -523,7 +574,9 @@ std::vector<torch::Tensor> causal_conv1d_non_spec(
           reorder_input,
           token_indx_ptr,
           non_spec_token,
-          fuse_l2norm);
+          fuse_l2norm,
+          checkpoint.offsets,
+          checkpoint.state_indices);
     }
 
     // Run standalone l2norm kernel when not fused into conv1d
@@ -766,7 +819,9 @@ void gated_delta_rule_non_spec(
     const std::optional<torch::Tensor>& non_spec_token_indx,
     const torch::Tensor& non_spec_state_indices_tensor,
     const int64_t num_actual_tokens,
-    const int64_t tp_size) {
+    const int64_t tp_size,
+    const std::optional<torch::Tensor>& checkpoint_offsets,
+    const std::optional<torch::Tensor>& checkpoint_state_indices) {
   TORCH_CHECK(
       core_attn_out.is_contiguous(), "core_attn_out must be contiguous");
   TORCH_CHECK(
@@ -806,6 +861,10 @@ void gated_delta_rule_non_spec(
 
   auto& queue = vllm::xpu::vllmGetQueue();
   std::optional<torch::Tensor> empty_tensor{std::nullopt};
+  const PrefillCheckpointPtrs checkpoint = get_prefill_checkpoint_ptrs(
+      checkpoint_offsets,
+      checkpoint_state_indices,
+      non_spec_query_start_loc.size(0) - 1);
 
 #ifdef VLLM_XPU_ENABLE_XE2
   if (num_prefills > 0) {
@@ -830,7 +889,9 @@ void gated_delta_rule_non_spec(
         has_initial_state,
         num_prefills,
         num_decodes,
-        token_indx_ptr);
+        token_indx_ptr,
+        checkpoint.offsets,
+        checkpoint.state_indices);
   } else {
     gdn::gated_delta_rule(
         queue,
@@ -913,7 +974,9 @@ void gdn_attention(
     const std::optional<torch::Tensor>& num_accepted_tokens,
     const int64_t num_actual_tokens,
     const int64_t tp_size,
-    const bool reorder_input) {
+    const bool reorder_input,
+    const std::optional<torch::Tensor>& checkpoint_offsets,
+    const std::optional<torch::Tensor>& checkpoint_state_indices) {
   // Determine which paths are active using the same conditions the conv/delta
   // ops use internally.
   int non_spec_token = 0;
@@ -998,7 +1061,9 @@ void gdn_attention(
         *non_spec_state_indices_tensor,
         num_actual_tokens,
         tp_size,
-        reorder_input);
+        reorder_input,
+        checkpoint_offsets,
+        checkpoint_state_indices);
 
     gated_delta_rule_non_spec(
         core_attn_out,
@@ -1020,6 +1085,8 @@ void gdn_attention(
         non_spec_token_indx,
         *non_spec_state_indices_tensor,
         num_actual_tokens,
-        tp_size);
+        tp_size,
+        checkpoint_offsets,
+        checkpoint_state_indices);
   }
 }
