@@ -132,6 +132,12 @@ void cutlass_chunk_prefill_impl(
   bool is_fp8_q =
       (query.scalar_type() == at::ScalarType::Float8_e5m2 ||
        query.scalar_type() == at::ScalarType::Float8_e4m3fn);
+  // Full fp8 attention (fp8 Q) is not supported; a bf16/fp16 query with an
+  // fp8 KV cache is.
+  TORCH_CHECK(
+      !is_fp8_q,
+      "chunk_prefill on XE3 does not support an fp8 query; use a bf16/fp16 "
+      "query (an fp8 KV cache is supported).");
 
   chunk_prefill_args_t args = {
       query.data_ptr(),
@@ -145,7 +151,7 @@ void cutlass_chunk_prefill_impl(
       max_seqlen_k,
       total_seqlen_q,
       total_seqlen_k,
-      (is_fp8_q && q_scale.has_value()) ? q_scale.value().data_ptr() : nullptr,
+      nullptr,  // q_scale: only used with an fp8 query
       is_fp8_kv ? k_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? v_scale.value().data_ptr() : nullptr,
       static_cast<float>(sm_scale),
@@ -164,14 +170,14 @@ void cutlass_chunk_prefill_impl(
       is_local,
       is_sink};
 
-  // softmax_lse output is only supported on the
-  // !Paged && !Local && !Sink specialization (template-constrained to
-  // keep kernel instantiation count bounded).
+  // Paged and non-paged chunk prefill support LSE for global attention
+  // without sinks. Local/Sink specializations remain disabled to keep the
+  // kernel matrix bounded.
   bool is_lse = softmax_lse.has_value();
   TORCH_CHECK(
-      !is_lse || (!is_paged && !is_local && !is_sink),
-      "softmax_lse output is only supported when is_paged=false, "
-      "is_local=false, is_sink=false");
+      !is_lse || (!is_local && !is_sink),
+      "chunk prefill softmax_lse output is only supported when "
+      "is_local=false and is_sink=false");
   if (is_lse) {
     args.softmax_lse = softmax_lse.value().data_ptr<float>();
     // softmax_lse is allocated as (num_heads_q, total_seqlen_q); stride
@@ -251,29 +257,6 @@ void cutlass_chunk_prefill_impl(
   }
 
   CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
-
-  // Full fp8 attention: when the query itself is fp8, Q/K/V all flow through
-  // the fp8 MMAs. The output precision is independent of the fp8 inputs, so
-  // carry it explicitly. q_scale/k_scale/v_scale are passed as device pointers
-  // and fused inside the kernel (q_scale and k_scale into the softmax scale,
-  // v_scale as a post-loop output rescale), so the caller passes raw per-tensor
-  // scales.
-  if (is_fp8_q) {
-    TORCH_CHECK(
-        head_size == 128,
-        "Full fp8 chunk_prefill only supports head dimension 128, got ",
-        head_size,
-        ".");
-    TORCH_CHECK(
-        cuQKType.q_type == cuQKType.k_type,
-        "Full fp8 chunk_prefill requires Q and K/V cache to share the same fp8 "
-        "type (both e4m3 or both e5m2).");
-    TORCH_CHECK(
-        out.scalar_type() == at::ScalarType::Half ||
-            out.scalar_type() == at::ScalarType::BFloat16,
-        "Full fp8 chunk_prefill output must be half or bfloat16.");
-    cuQKType.o_type = aten_to_dtype(out);
-  }
 
   static constexpr int max_head_size = 512;
   TORCH_CHECK(

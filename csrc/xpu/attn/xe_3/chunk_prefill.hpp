@@ -23,6 +23,7 @@
 #include "kernel/chunk_prefill_kernel.hpp"
 
 #include "csrc/xpu/attn/fmha_utils.hpp"
+#include "chunk_prefill_common.hpp"
 
 // Everything below belongs to this architecture alone.
 //
@@ -39,60 +40,6 @@
 // declarations back to global namespace.
 namespace vllm::xpu::xe3 {
 using namespace cute;
-
-struct chunk_prefill_args_t {
-  void* query;
-  void* key;
-  void* value;
-  void* out;
-  void* block_table;
-  void* cu_seqlens_q;
-  void* cu_seqlens_k;
-  int max_queries;
-  int max_keys;
-  int total_seqlen_q;
-  int total_seqlen_k;
-  void* q_scale;
-  void* k_scale;
-  void* v_scale;
-  float sm_scale;
-  void* sm_sink;
-  int batch_size;
-  int num_heads_q;
-  int num_heads_k;
-  int head_size;
-  int max_blocks_per_seq;
-  int block_size;
-  int window_size_left = -1;
-  int window_size_right = -1;
-  bool is_varlen = false;
-  bool is_paged = false;
-  bool is_causal = false;
-  bool is_local = false;
-  bool is_sink = false;
-  // softmax_lse output (nullptr when not requested)
-  float* softmax_lse = nullptr;
-  int lse_stride = 0;  // stride along head dim (= total_seqlen_q)
-  // Q/O strides in CUTLASS order: (seq, head_size=1, heads, batch)
-  int q_stride_seq = 0;
-  int q_stride_heads = 0;
-  int q_stride_batch = 0;
-  // K strides in CUTLASS order: (seq, head_size=1, heads, batch)
-  int k_stride_seq = 0;
-  int k_stride_heads = 0;
-  int k_stride_batch = 0;
-  // V strides in CUTLASS order: (head_size=1, seq, heads, batch)
-  int v_stride_seq = 0;
-  int v_stride_heads = 0;
-  int v_stride_batch = 0;
-  // O strides in CUTLASS order: (seq, head_size=1, heads, batch)
-  int o_stride_seq = 0;
-  int o_stride_heads = 0;
-  int o_stride_batch = 0;
-  // per-batch mask: true = prefill, false = decode; nullptr = process all
-  void* is_prefill = nullptr;
-  int page_stride_elements = 0;
-};
 
 template <class FMHAKernel, bool isVarLen>
 struct KernelLauncher {
@@ -355,6 +302,22 @@ struct FMHAConfig {
         Scheduler,
         SoftmaxLSE>;
 
+    // K/V taller than one 2D block-load surface needs the sub-surface variant.
+    if constexpr (Paged) {
+      if (args.total_seqlen_k > cutlass::fmha::collective::kXeMaxSurfaceRows) {
+        using LargeSurfaceKernel = cutlass::fmha::kernel::XeFMHAFwdKernel<
+            ProblemShapeType,
+            CollectiveMainloop,
+            CollectiveEpilogue,
+            Scheduler,
+            SoftmaxLSE,
+            true>;
+        KernelLauncher<LargeSurfaceKernel, VarLen> launcher;
+        launcher.run(queue, args, hw_info);
+        return;
+      }
+    }
+
     KernelLauncher<FMHAKernel, VarLen> launcher;
 
     launcher.run(queue, args, hw_info);
@@ -365,25 +328,6 @@ struct FMHAConfig {
     return run<cutlass::fmha::kernel::XeFHMAIndividualTileScheduler<Causal>>(
         queue, args);
   }
-};
-
-template <typename Policy, bool Causal, typename = void>
-struct chunk_policy_dispatch_shapes {
-  using ShapeQK = typename Policy::ShapeQK;
-  using ShapePV = typename Policy::ShapePV;
-  using ShapeOut = typename Policy::ShapeOut;
-  using SubgroupLayoutQK = typename Policy::SubgroupLayoutQK;
-};
-
-template <typename Policy>
-struct chunk_policy_dispatch_shapes<
-    Policy,
-    true,
-    cute::void_t<typename Policy::ShapeQK_Causal>> {
-  using ShapeQK = typename Policy::ShapeQK_Causal;
-  using ShapePV = typename Policy::ShapePV_Causal;
-  using ShapeOut = typename Policy::ShapeOut_Causal;
-  using SubgroupLayoutQK = typename Policy::SubgroupLayoutQK_Causal;
 };
 
 // Hidden visibility prevents these per-arch template instantiations from being
@@ -397,8 +341,7 @@ template <
     bool Causal,
     bool Local,
     bool Sink,
-    bool SoftmaxLSE,
-    bool FullFp8>
+    bool SoftmaxLSE>
 __attribute__((visibility("hidden"))) void policy_dispatch_impl(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
@@ -410,216 +353,125 @@ __attribute__((visibility("hidden"))) void policy_dispatch_impl(
   using DispatchShapePV = typename dispatch_shapes::ShapePV;
   using DispatchShapeOut = typename dispatch_shapes::ShapeOut;
   using DispatchSubgroupLayoutQK = typename dispatch_shapes::SubgroupLayoutQK;
-  if constexpr (FullFp8) {
-    // Instantiated only in the generated *_fp8_ translation units.
-    if (cuQKType.q_type == CutlassDType::float8_e4m3 ||
-        cuQKType.q_type == CutlassDType::float8_e5m2) {
-      constexpr int kHeadDim = cute::size<1>(typename chunk_policy::ShapeOut{});
-      if constexpr (kHeadDim != 128) {
-        TORCH_CHECK(
-            false, "Full fp8 chunk_prefill only supports head dimension 128.");
-      } else {
-        // Full-fp8: the query is fp8, so Q/K/V all flow through fp8 DPAS GEMMs
-        // (Q and K/V share the same fp8 type). The output element type is
-        // carried independently in o_type (half or bfloat16).
-        //
-        // The full-fp8 path uses ISOLATED, independently-tunable tile shapes
-        // (fp8_policy_of_t<chunk_policy>, defined in fmha_utils.hpp) rather
-        // than the half/bf16 chunk_policy shapes, so the fp8 tiles can be tuned
-        // directly without affecting the half/bf16 path.
-        using fp8_policy = fp8_policy_of_t<chunk_policy>;
-        constexpr int kPVContract =
-            cute::size<2>(typename fp8_policy::ShapePV{});
-        if constexpr (kPVContract % 32 != 0) {
-          TORCH_CHECK(
-              false,
-              "Full fp8 chunk_prefill requires the P*V contraction tile "
-              "to be a multiple of 32; use block_size >= 32.");
-        } else {
-          if (cuQKType.q_type == CutlassDType::float8_e4m3) {
-            if (cuQKType.o_type == CutlassDType::half) {
-              return FMHAConfig<
-                  typename fp8_policy::ShapeQK,
-                  typename fp8_policy::ShapePV,
-                  typename fp8_policy::ShapeOut,
-                  typename fp8_policy::SubgroupLayoutQK,
-                  void,
-                  PipelineStages,
-                  Paged,
-                  Causal,
-                  Local,
-                  Sink,
-                  SoftmaxLSE,
-                  float_e4m3_t,
-                  float_e4m3_t,
-                  float_e4m3_t,
-                  half_t>::kernel_dispatch(queue, args);
-            } else {
-              return FMHAConfig<
-                  typename fp8_policy::ShapeQK,
-                  typename fp8_policy::ShapePV,
-                  typename fp8_policy::ShapeOut,
-                  typename fp8_policy::SubgroupLayoutQK,
-                  void,
-                  PipelineStages,
-                  Paged,
-                  Causal,
-                  Local,
-                  Sink,
-                  SoftmaxLSE,
-                  float_e4m3_t,
-                  float_e4m3_t,
-                  float_e4m3_t,
-                  bfloat16_t>::kernel_dispatch(queue, args);
-            }
-          } else {
-            if (cuQKType.o_type == CutlassDType::half) {
-              return FMHAConfig<
-                  typename fp8_policy::ShapeQK,
-                  typename fp8_policy::ShapePV,
-                  typename fp8_policy::ShapeOut,
-                  typename fp8_policy::SubgroupLayoutQK,
-                  void,
-                  PipelineStages,
-                  Paged,
-                  Causal,
-                  Local,
-                  Sink,
-                  SoftmaxLSE,
-                  float_e5m2_t,
-                  float_e5m2_t,
-                  float_e5m2_t,
-                  half_t>::kernel_dispatch(queue, args);
-            } else {
-              return FMHAConfig<
-                  typename fp8_policy::ShapeQK,
-                  typename fp8_policy::ShapePV,
-                  typename fp8_policy::ShapeOut,
-                  typename fp8_policy::SubgroupLayoutQK,
-                  void,
-                  PipelineStages,
-                  Paged,
-                  Causal,
-                  Local,
-                  Sink,
-                  SoftmaxLSE,
-                  float_e5m2_t,
-                  float_e5m2_t,
-                  float_e5m2_t,
-                  bfloat16_t>::kernel_dispatch(queue, args);
-            }
-          }
-        }
-      }
+  // Existing Q dtypes, including FP8 KV-cache combinations. Full fp8 (fp8 Q)
+  // is rejected by the host (fmha_xe3.cpp).
+  // bf16 Q with an fp8 KV cache: run both DPAS GEMMs in fp16. e4m3/e5m2 ->
+  // fp16 is a single exact conversion on Xe3 (vs. e4m3 -> fp16 -> f32 -> bf16
+  // for a bf16 MMA), which otherwise dominates the K loop because every
+  // subgroup converts the full K/V tile for only SGTileQ query rows. fp16 has
+  // more mantissa than bf16; Q tiles outside the fp16 range are rescaled by a
+  // power of two in the mainloop (exact), and softmax probabilities are in
+  // [0, 1]. The output is still written as bf16.
+  static constexpr int DispatchSGTileQ =
+      get<0>(shape_div(DispatchShapeQK{}, shape(DispatchSubgroupLayoutQK{})))();
+  using Fp8KVHalfMMA = XE_DPAS_TT<cute::gcd(DispatchSGTileQ, 8), float, half_t>;
+  if (cuQKType.q_type == CutlassDType::bfloat16) {
+    if (cuQKType.k_type == CutlassDType::bfloat16) {
+      return FMHAConfig<
+          DispatchShapeQK,
+          DispatchShapePV,
+          DispatchShapeOut,
+          DispatchSubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Paged,
+          Causal,
+          Local,
+          Sink,
+          SoftmaxLSE,
+          bfloat16_t,
+          bfloat16_t,
+          bfloat16_t,
+          bfloat16_t>::kernel_dispatch(queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
+      return FMHAConfig<
+          DispatchShapeQK,
+          DispatchShapePV,
+          DispatchShapeOut,
+          DispatchSubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Paged,
+          Causal,
+          Local,
+          Sink,
+          SoftmaxLSE,
+          bfloat16_t,
+          float_e4m3_t,
+          float_e4m3_t,
+          bfloat16_t,
+          Fp8KVHalfMMA>::kernel_dispatch(queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
+      return FMHAConfig<
+          DispatchShapeQK,
+          DispatchShapePV,
+          DispatchShapeOut,
+          DispatchSubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Paged,
+          Causal,
+          Local,
+          Sink,
+          SoftmaxLSE,
+          bfloat16_t,
+          float_e5m2_t,
+          float_e5m2_t,
+          bfloat16_t,
+          Fp8KVHalfMMA>::kernel_dispatch(queue, args);
     }
-  } else {
-    // Existing Q dtypes, including FP8 KV-cache combinations.
-    if (cuQKType.q_type == CutlassDType::bfloat16) {
-      if (cuQKType.k_type == CutlassDType::bfloat16) {
-        return FMHAConfig<
-            DispatchShapeQK,
-            DispatchShapePV,
-            DispatchShapeOut,
-            DispatchSubgroupLayoutQK,
-            void,
-            PipelineStages,
-            Paged,
-            Causal,
-            Local,
-            Sink,
-            SoftmaxLSE,
-            bfloat16_t,
-            bfloat16_t,
-            bfloat16_t,
-            bfloat16_t>::kernel_dispatch(queue, args);
-      } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
-        return FMHAConfig<
-            DispatchShapeQK,
-            DispatchShapePV,
-            DispatchShapeOut,
-            DispatchSubgroupLayoutQK,
-            void,
-            PipelineStages,
-            Paged,
-            Causal,
-            Local,
-            Sink,
-            SoftmaxLSE,
-            bfloat16_t,
-            float_e4m3_t,
-            float_e4m3_t,
-            bfloat16_t>::kernel_dispatch(queue, args);
-      } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
-        return FMHAConfig<
-            DispatchShapeQK,
-            DispatchShapePV,
-            DispatchShapeOut,
-            DispatchSubgroupLayoutQK,
-            void,
-            PipelineStages,
-            Paged,
-            Causal,
-            Local,
-            Sink,
-            SoftmaxLSE,
-            bfloat16_t,
-            float_e5m2_t,
-            float_e5m2_t,
-            bfloat16_t>::kernel_dispatch(queue, args);
-      }
-    } else if (cuQKType.q_type == CutlassDType::half) {
-      if (cuQKType.k_type == CutlassDType::half) {
-        return FMHAConfig<
-            DispatchShapeQK,
-            DispatchShapePV,
-            DispatchShapeOut,
-            DispatchSubgroupLayoutQK,
-            void,
-            PipelineStages,
-            Paged,
-            Causal,
-            Local,
-            Sink,
-            SoftmaxLSE,
-            half_t,
-            half_t,
-            half_t,
-            half_t>::kernel_dispatch(queue, args);
-      } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
-        return FMHAConfig<
-            DispatchShapeQK,
-            DispatchShapePV,
-            DispatchShapeOut,
-            DispatchSubgroupLayoutQK,
-            void,
-            PipelineStages,
-            Paged,
-            Causal,
-            Local,
-            Sink,
-            SoftmaxLSE,
-            half_t,
-            float_e4m3_t,
-            float_e4m3_t,
-            half_t>::kernel_dispatch(queue, args);
-      } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
-        return FMHAConfig<
-            DispatchShapeQK,
-            DispatchShapePV,
-            DispatchShapeOut,
-            DispatchSubgroupLayoutQK,
-            void,
-            PipelineStages,
-            Paged,
-            Causal,
-            Local,
-            Sink,
-            SoftmaxLSE,
-            half_t,
-            float_e5m2_t,
-            float_e5m2_t,
-            half_t>::kernel_dispatch(queue, args);
-      }
+  } else if (cuQKType.q_type == CutlassDType::half) {
+    if (cuQKType.k_type == CutlassDType::half) {
+      return FMHAConfig<
+          DispatchShapeQK,
+          DispatchShapePV,
+          DispatchShapeOut,
+          DispatchSubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Paged,
+          Causal,
+          Local,
+          Sink,
+          SoftmaxLSE,
+          half_t,
+          half_t,
+          half_t,
+          half_t>::kernel_dispatch(queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
+      return FMHAConfig<
+          DispatchShapeQK,
+          DispatchShapePV,
+          DispatchShapeOut,
+          DispatchSubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Paged,
+          Causal,
+          Local,
+          Sink,
+          SoftmaxLSE,
+          half_t,
+          float_e4m3_t,
+          float_e4m3_t,
+          half_t>::kernel_dispatch(queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
+      return FMHAConfig<
+          DispatchShapeQK,
+          DispatchShapePV,
+          DispatchShapeOut,
+          DispatchSubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Paged,
+          Causal,
+          Local,
+          Sink,
+          SoftmaxLSE,
+          half_t,
+          float_e5m2_t,
+          float_e5m2_t,
+          half_t>::kernel_dispatch(queue, args);
     }
   }
   TORCH_CHECK(
