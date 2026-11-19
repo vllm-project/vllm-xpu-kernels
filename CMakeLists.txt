@@ -691,9 +691,12 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/rand/exponential.cpp"
       "csrc/xpu/utils.cpp")
   if(MOE_KERNELS_ENABLED)
-    list(APPEND VLLM_EXT_XPU_SRC
-         "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp"
-         "csrc/xpu/grouped_gemm/moe_shared_fused_interface.cpp")
+    list(
+      APPEND
+      VLLM_EXT_XPU_SRC
+      "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp"
+      "csrc/xpu/grouped_gemm/moe_shared_fused_interface.cpp"
+      "csrc/xpu/grouped_gemm/moe_int4_gemv.cpp")
   endif()
   if(GDN_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/gdn_attn/gdn_attn_interface.cpp")
