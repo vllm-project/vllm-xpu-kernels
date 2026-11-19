@@ -190,6 +190,16 @@ def _infer_num_xe_cores(device: torch.device) -> int:
                  or getattr(props, "subslices_per_slice", None))
     if slices is not None and subslices is not None:
         return max(1, int(slices) * int(subslices))
+    # torch's XPU device properties do not expose the slice and
+    # subslices-per-slice pair probed above (checked torch 2.5 through
+    # 2.15), so that branch never fires. They do expose the total Xe-core
+    # count as `gpu_subslice_count` (gpu_eu_count / gpu_eu_count_per_subslice),
+    # the same value flash_api.cpp::get_num_splits() reads through SYCL.
+    # Without this every device falls back to 20, which undercounts e.g. the
+    # 32-core Arc Pro B70 and keeps this plan from matching the kernel's.
+    count = getattr(props, "gpu_subslice_count", None)
+    if count:
+        return max(1, int(count))
     return 20
 
 
