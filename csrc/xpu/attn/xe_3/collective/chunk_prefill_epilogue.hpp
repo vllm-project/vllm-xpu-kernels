@@ -82,13 +82,6 @@ class FMHAFwdEpilogue {
   // softmax sink, same dtype
   static constexpr bool Sink = Sink_;
   using ElementSink = typename CollectiveMainloop::TensorQ::element_type;
-  // Full-fp8: the mainloop biases the softmax exponent by +8 (see softmax()),
-  // scaling both the P*V numerator and the row-sum denominator by 2^8. The sink
-  // term is added to the denominator here, so it must carry the same bias.
-  static constexpr bool Fp8Q =
-      cute::is_same_v<ElementSink, cutlass::float_e5m2_t> ||
-      cute::is_same_v<ElementSink, cutlass::float_e4m3_t>;
-  static constexpr int kFp8SinkOffset = Fp8Q ? 8 : 0;
 
   // Split k-reduced tiles between participating subgroups.
   // Assumption: the A tile is contiguous.
@@ -115,7 +108,7 @@ class FMHAFwdEpilogue {
       make_layout(select<1, 0>(SGTileShapeO{}), Stride<E<1>, E<0>>{})));
   using ReduceFragARow = decltype(reduce<1>(ReduceFragA{}, sycl::plus<void>{}));
 
-  static auto default_tiled_copy_O_helper() {
+  static auto default_tiled_copy_O_base_helper() {
     if constexpr (ReduceK{} == _1{})
       return make_block_2d_copy_D(TiledMMAPV{}, TensorO2D{});
     else
@@ -124,6 +117,36 @@ class FMHAFwdEpilogue {
           ReduceFragA{}.tv_layout(),
           ReduceSGLayout{},
           TensorO2D{});
+  }
+
+  static auto default_tiled_copy_O_helper() {
+    auto default_copy = default_tiled_copy_O_base_helper();
+    // For 16-bit outputs, pack two values into each d32 block2D(d32.16x8nn).
+    // This increases bytes per message and avoids the slower d16
+    // store(d16.16x8nn).
+    using DefaultStoreOp = typename decltype(default_copy)::CopyOp;
+    if constexpr (
+        sizeof_bits_v<ElementO> == 16 && DefaultStoreOp::AtomWidth <= 16) {
+      static_assert(
+          DefaultStoreOp::CopyBits == 16 && DefaultStoreOp::AtomWidth % 2 == 0);
+      using D32StoreOp = XE_STORE_2D<
+          32,
+          DefaultStoreOp::AtomHeight,
+          DefaultStoreOp::AtomWidth>;
+      if constexpr (ReduceK{} == _1{}) {
+        return make_block_2d_copy_CD(D32StoreOp{}, TiledMMAPV{}, TensorO2D{});
+      } else {
+        return make_block_2d_copy_CD_subtiled<ElementO>(
+                   D32StoreOp{},
+                   TiledMMAPV{},
+                   atuple_coshape(ReduceFragA{}.tv_layout()),
+                   ReduceSGLayout{},
+                   TensorO2D{}.stride())
+            .with(TensorO2D{});
+      }
+    } else {
+      return default_copy;
+    }
   }
 
   using DefaultTiledCopyO = decltype(default_tiled_copy_O_helper());
@@ -184,12 +207,8 @@ class FMHAFwdEpilogue {
 
     // Collapse the deferred per-lane partial row sums into the full row sum,
     // unless the caller already performed the horizontal reduction.
-    auto tA_sum_full = [&]() -> decltype(auto) {
-      if constexpr (SumIsReduced)
-        return (tA_sum);
-      else
-        return reduce<0, ReduceMode::Horizontal>(tA_sum, sycl::plus<void>{});
-    }();
+    auto tA_sum_full =
+        reduce<0, ReduceMode::Horizontal>(tA_sum, sycl::plus<void>{});
 
     // Reduce k-blocks of A and A_sum across WG, if needed.
     auto [rA, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum_full, thr_id);
@@ -203,15 +222,14 @@ class FMHAFwdEpilogue {
       if constexpr (Sink) {
         constexpr double kLog2e = 1.4426950408889634074;
         rA_sum(i) += sycl::native::exp2(
-            static_cast<ElementA>(tSink * kLog2e) - tA_max(i) +
-            ElementA(kFp8SinkOffset));
+            static_cast<ElementA>(tSink * kLog2e) - tA_max(i));
       }
       rA_sum(i) = ElementA(1) / rA_sum(i);
     }
 
-    CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < rA.size(); i++)
-      rA(i) *= broadcast<0>(rA_sum, rA, i);
+    // CUTLASS_PRAGMA_UNROLL
+    // for (int i = 0; i < rA.size(); i++)
+    //   rA(i) *= broadcast<0>(rA_sum, rA, i);
 
     /* Tile output */
     Tensor cO = make_identity_tensor(O.shape());       // (q,v)
@@ -225,7 +243,10 @@ class FMHAFwdEpilogue {
     auto tOgO = thr_copy_o.partition_D(gO);
 
     /* Reorder tile and write out */
-    reorder(rA, tOrO);
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < rA.size(); i++)
+      rA(i) *= broadcast<0>(rA_sum, rA, i);
+    cute::reorder(rA, tOrO);
     copy(copy_o, tOrO, tOgO);
   }
 
@@ -557,64 +578,45 @@ class DecodeFwdEpilogue {
     using ElementA = typename FragA::element_type;
     constexpr float kLn2 = 0.6931471805599453f;
 
+    // Reduce k-blocks of A and A_sum across WG, if needed.
     // Decode tiles head_group_q across the grid's Q dimension (blk_qv[0]).
-    // The work-item's row within this tile is thr_id; its global head-group
-    // row is offset by the tile start. q_tile_rows is the packed-Q tile size.
+    // Within the tile, subgroups are laid out (a_tile, k_blk): a_tile picks
+    // a block of sg_rows packed-Q rows, k_blk a KV slice. Row statistics of
+    // a_tile are owned by its k_blk == 0 subgroup, row = lane (both before
+    // and after reduce_A). With one a_tile this is thr_id < q_tile_rows.
     constexpr int q_tile_rows = cute::size<0>(TileShapeO{});
-    int q_row = get<0>(blk_qv) * q_tile_rows + thr_id;
-    bool row_valid = (thr_id < q_tile_rows) && (q_row < head_group_q);
-
-    auto [rA, rA_max, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum, thr_id);
-
-    // Softmax denominator for the row this work-item reports statistics for
-    // (q_row). The Sink block below folds the sink into rA_sum(0) using the
-    // *output tile* row mapping, which is what the O normalization needs but
-    // does not agree with the q_row mapping used by the per-split/final LSE
-    // writes. Snapshot the pre-sink denominator here and re-apply the sink for
-    // q_row explicitly so the reported statistics stay correct.
-    ElementA stats_sum = rA_sum(0);
-
-    Tensor cO = make_identity_tensor(O.shape());       // (q,v)
-    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);  // (q,v)
-    TiledCopyO copy_o{O};
-    auto thr_copy_o = copy_o.get_slice(thr_id);
-    auto tOgO = thr_copy_o.partition_D(gO);  // fragment coords (q,v)
-
+    constexpr int sg_rows = cute::size<0>(SGTileShapeA{});
+    auto thr_vak = group<1, 3>(TiledMMAPV{}.get_thr_layout_vmnk())
+                       .get_flat_coord(assert_uniform(thr_id));
+    const int a_tile = get<1>(thr_vak);
+    const int k_blk = get<2>(thr_vak);
+    const int lane = thr_id % intel::sg_size;
+    int q_row = get<0>(blk_qv) * q_tile_rows + a_tile * sg_rows + lane;
+    bool row_valid = (k_blk == 0) && (lane < sg_rows) &&
+                     (a_tile * sg_rows + lane < q_tile_rows) &&
+                     (q_row < head_group_q);
     if constexpr (Sink) {
       constexpr double kLog2e = 1.4426950408889634074;
-      if (row_valid && idx_kv_split == 0) {
-        stats_sum += sycl::native::exp2(
-            static_cast<ElementA>(tSink(q_row) * kLog2e) - rA_max(0) +
+      if (idx_kv_split == 0 && row_valid) {
+        tA_sum(0) += sycl::native::exp2(
+            static_cast<ElementA>(tSink(q_row) * kLog2e) - tA_max(0) +
             ElementA(kFp8SinkOffset));
-      }
-      if (active && idx_kv_split == 0) {
-        int base_row = cute::get<0>(tOgO(cute::_0{}, cute::_0{}, cute::_0{}));
-        int lane =
-            static_cast<int>(sycl::ext::oneapi::this_work_item::get_sub_group()
-                                 .get_local_id()[0]);
-        int row_i = base_row + (lane % cute::size<0>(SGTileShapeO{}));
-        if (row_i < head_group_q) {
-          rA_sum(0) += sycl::native::exp2(
-              static_cast<ElementA>(tSink(row_i) * kLog2e) - rA_max(0) +
-              ElementA(kFp8SinkOffset));
-        }
       }
     }
 
+    auto [rA, rA_max, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum, thr_id);
+
     // Store one natural-log LSE for this KV split. ReduceSplitK uses it exactly
     // like CUDA FlashAttention: weight_i = exp(LSE_i - logsumexp(LSE)).
+    // The sink (split 0 only) is already folded into tA_sum above, so rA_sum(0)
+    // is the full softmax denominator for q_row. rA_max is in log2 units.
+    // Full fp8 scales the row sum by 2^kFp8SinkOffset (the mainloop's +8
+    // exponent bias); remove it so the reported LSE is unbiased.
     // Assume seq_len_qo == 1.
-    //
-    // Full-fp8 biases the softmax exponent by +8 (kFp8SinkOffset), so the row
-    // sums carry a factor of 2^8 that rA_max does not. Subtract the bias here
-    // so the reported LSE is the true log-sum-exp. The bias is uniform across
-    // splits, so the split-K weights are unaffected either way; only the
-    // softmax_lse output would otherwise be off by a constant 8*ln2.
     if (row_valid && (num_kv_splits > 1 || ptr_lse != nullptr)) {
       ElementLSE row_lse = static_cast<ElementLSE>(
-          (static_cast<float>(rA_max(0)) - static_cast<float>(kFp8SinkOffset)) *
-              kLn2 +
-          sycl::log(static_cast<float>(stats_sum)));
+          (static_cast<float>(rA_max(0)) - float(kFp8SinkOffset)) * kLn2 +
+          sycl::log(static_cast<float>(rA_sum(0))));
       if (num_kv_splits > 1) {
         softmax_lse_accum(q_row, idx_kv_split) = row_lse;
       }
@@ -642,8 +644,16 @@ class DecodeFwdEpilogue {
       rA(i) *= broadcast<0>(rA_sum, rA, i);
     }
 
-    /* Tile output (cO/gO/copy_o/thr_copy_o/tOgO computed above for the sink) */
+    /* Tile output */
+    Tensor cO = make_identity_tensor(O.shape());       // (q,v)
+    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);  // (q,v)
+
+    /* Prepare slices */
+    TiledCopyO copy_o{O};
+    auto thr_copy_o = copy_o.get_slice(thr_id);
+
     auto tOrO = thr_copy_o.partition_sg_fragment_S(gO);
+    auto tOgO = thr_copy_o.partition_D(gO);
 
     /* Reorder tile and write out */
     reorder(rA, tOrO);
