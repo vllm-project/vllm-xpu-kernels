@@ -19,8 +19,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compact_sampling_mask(
       "logits tensor must be 2D [num_source_rows, vocab_size], but got dim ",
       logits.dim());
   TORCH_CHECK(
-      logits.dtype() == torch::kFloat32,
-      "logits tensor must be float32, but got ",
+      logits.dtype() == torch::kFloat32 ||
+          logits.dtype() == torch::kFloat16 ||
+          logits.dtype() == torch::kBFloat16,
+      "logits tensor must be float32, float16, or bfloat16, but got ",
       logits.dtype());
 
   CHECK_DEVICE(num_sampled_tokens);
@@ -94,42 +96,48 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compact_sampling_mask(
 
   auto& queue = vllm::xpu::vllmGetQueue();
 
-  // num_sampled_tokens and cu_num_logits may carry different integer dtypes
-  // (int32/int64), so resolve each index type independently.
-  auto launch = [&](auto num_sampled_dummy, auto cu_dummy) {
-    using index_t = decltype(num_sampled_dummy);
-    using cu_index_t = decltype(cu_dummy);
-    CompactSamplingMaskImpl::
-        compact_sampling_mask_kernel_launcher<index_t, cu_index_t>(
-            queue,
-            logits.data_ptr<float>(),
-            cu_num_logits.data_ptr<cu_index_t>(),
-            num_sampled_tokens.data_ptr<index_t>(),
-            token_ids.data_ptr<int>(),
-            packed_mask.data_ptr<uint8_t>(),
-            counts.data_ptr<int>(),
-            num_reqs,
-            rows_per_request_,
-            real_max_num_kept,
-            vocab_size);
-  };
+  VLLM_DISPATCH_FLOATING_TYPES(
+      logits.scalar_type(), "compact_sampling_mask", [&] {
+        using logits_t =
+            typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
 
-  const bool sampled_is_int64 =
-      num_sampled_tokens.scalar_type() == torch::kInt64;
-  const bool cu_is_int64 = cu_num_logits.scalar_type() == torch::kInt64;
-  if (sampled_is_int64) {
-    if (cu_is_int64) {
-      launch(int64_t{}, int64_t{});
-    } else {
-      launch(int64_t{}, int32_t{});
-    }
-  } else {
-    if (cu_is_int64) {
-      launch(int32_t{}, int64_t{});
-    } else {
-      launch(int32_t{}, int32_t{});
-    }
-  }
+        // Resolve the two index dtypes independently.
+        auto launch = [&](auto num_sampled_dummy, auto cu_dummy) {
+          using index_t = decltype(num_sampled_dummy);
+          using cu_index_t = decltype(cu_dummy);
+          CompactSamplingMaskImpl::
+              compact_sampling_mask_kernel_launcher<
+                  index_t, cu_index_t, logits_t>(
+                  queue,
+                  reinterpret_cast<const logits_t*>(logits.data_ptr()),
+                  cu_num_logits.data_ptr<cu_index_t>(),
+                  num_sampled_tokens.data_ptr<index_t>(),
+                  token_ids.data_ptr<int>(),
+                  packed_mask.data_ptr<uint8_t>(),
+                  counts.data_ptr<int>(),
+                  num_reqs,
+                  rows_per_request_,
+                  real_max_num_kept,
+                  vocab_size);
+        };
+
+        const bool sampled_is_int64 =
+            num_sampled_tokens.scalar_type() == torch::kInt64;
+        const bool cu_is_int64 = cu_num_logits.scalar_type() == torch::kInt64;
+        if (sampled_is_int64) {
+          if (cu_is_int64) {
+            launch(int64_t{}, int64_t{});
+          } else {
+            launch(int64_t{}, int32_t{});
+          }
+        } else {
+          if (cu_is_int64) {
+            launch(int32_t{}, int64_t{});
+          } else {
+            launch(int32_t{}, int32_t{});
+          }
+        }
+      });
 
   return {token_ids, packed_mask, counts};
 }
