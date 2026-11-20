@@ -317,6 +317,19 @@ class fused_qk_norm_rope_n_heads_kernel {
       k_w[i] = static_cast<float>(k_weight[dim]);
     }
 
+    // Issue the GPT-J cos/sin loads before the qkv loads so their latency
+    // is hidden behind the RMS reduction.
+    float cos_r[HALF_NEPT], sin_r[HALF_NEPT];
+    if constexpr (!IS_NEOX) {
+      if (lane_id < rotary_lanes) {
+#pragma unroll
+        for (int i = 0; i < HALF_NEPT; ++i) {
+          cos_r[i] = static_cast<float>(cos_ptr[lane_id * HALF_NEPT + i]);
+          sin_r[i] = static_cast<float>(sin_ptr[lane_id * HALF_NEPT + i]);
+        }
+      }
+    }
+
     int off_all[HEADS_PER_SG];
     float elems[HEADS_PER_SG][NUM_ELEMS_PER_THREAD];
 #pragma unroll
@@ -348,9 +361,8 @@ class fused_qk_norm_rope_n_heads_kernel {
       if constexpr (!IS_NEOX) {
 #pragma unroll
         for (int i = 0; i < HALF_NEPT; ++i) {
-          const int half_dim = lane_id * HALF_NEPT + i;
-          const float cos_val = static_cast<float>(cos_ptr[half_dim]);
-          const float sin_val = static_cast<float>(sin_ptr[half_dim]);
+          const float cos_val = cos_r[i];
+          const float sin_val = sin_r[i];
 #pragma unroll
           for (int k = 0; k < HEADS_PER_SG; k++) {
             const float val0 = elems[k][2 * i];
@@ -400,12 +412,8 @@ class fused_qk_norm_rope_n_heads_kernel {
 
   static void sub_group_sum(const sycl::sub_group& sg, HeadBatch& s) {
 #pragma unroll
-    for (int offset = SUB_GROUP_SIZE / 2; offset > 0; offset >>= 1) {
-      const HeadBatch other = sycl::permute_group_by_xor(sg, s, offset);
-#pragma unroll
-      for (int k = 0; k < HEADS_PER_SG; k++)
-        s.v[k] += other.v[k];
-    }
+    for (int k = 0; k < HEADS_PER_SG; k++)
+      s.v[k] = sycl::reduce_over_group(sg, s.v[k], sycl::plus<float>());
   }
 
   scalar_t* __restrict__ qkv;
@@ -444,6 +452,9 @@ static inline int select_heads_per_sg(
     } else if (total_qk_units >= 4096) {
       heads_per_sg = 4;
     }
+    // The n_heads kernel keeps heads_per_sg * head_dim / 32 values per lane
+    // in registers; beyond 16 it spills, so cap by head_dim.
+    heads_per_sg = std::min(heads_per_sg, std::max(1, 512 / head_dim));
   }
 
   // Clamp to an instantiated value (1/2/4/8) that fits total_qk_heads.
@@ -491,10 +502,14 @@ void launch_fused_qk_norm_rope(
   const int heads_per_sg = select_heads_per_sg(
       forced_token_heads_per_warp, num_tokens, total_qk_heads, head_dim);
 
-// HEADS_PER_SG == 1 falls through to the original baseline kernel.
+// HEADS_PER_SG == 1 falls through to the original baseline kernel, except
+// for the interleaved NeoX layout: its per-lane element split changes the
+// rounding of the RMS sum, so every heads_per_sg value takes the n_heads
+// kernel there to keep the output bit-identical.
 #define DISPATCH_KERNEL(HEAD_DIM, IS_NEOX_V, HEADS_PER_SG_V)         \
   do {                                                               \
-    if constexpr (HEADS_PER_SG_V == 1) {                             \
+    const bool interleave = IS_NEOX_V && rotary_dim == (HEAD_DIM);   \
+    if (HEADS_PER_SG_V == 1 && !interleave) {                        \
       const int total_sgs = num_tokens * total_qk_heads;             \
       const int grid_sz = (total_sgs + sgs_per_wg - 1) / sgs_per_wg; \
       vllm::xpu::sycl_kernel_submit(                                 \
@@ -549,9 +564,13 @@ void launch_fused_qk_norm_rope(
                 embed_dim / nept,                                    \
                 embed_dim));                                         \
       };                                                             \
-      if (IS_NEOX_V && rotary_dim == (HEAD_DIM)) {                   \
-        submit(std::bool_constant<IS_NEOX_V>{});                     \
-      } else {                                                       \
+      if constexpr (IS_NEOX_V) {                                     \
+        if (interleave) {                                            \
+          submit(std::true_type{});                                  \
+          break;                                                     \
+        }                                                            \
+      }                                                              \
+      if constexpr (HEADS_PER_SG_V != 1) {                           \
         submit(std::false_type{});                                   \
       }                                                              \
     }                                                                \
