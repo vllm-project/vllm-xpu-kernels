@@ -79,6 +79,10 @@ option(XPU_SPECIFIC_KERNELS_ENABLED
 option(XPUMEM_ALLOCATOR_ENABLED "Build xpumem_allocator extension" ON)
 option(VLLM_XPU_ENABLE_ONEDNN
        "Build oneDNN-backed kernels (GEMM ops in _xpu_C extension)" ON)
+# Xe3(p)-only hand-written asm quant lib. Can be turned OFF independently of
+# VLLM_XPU_ENABLE_XE3P to work around IGC versions that miscompile the asm.
+# Build-time env: BUILD_QUANT_ASM_XE3=OFF (forwarded to cmake by setup.py).
+option(BUILD_QUANT_ASM_XE3 "Build the Xe3 hand-written asm quant library" ON)
 
 # KERNEL CONFIGURATION — controls which paged decode kernel variants are
 # compiled. Use model-specific configs to dramatically reduce compile time. See
@@ -462,26 +466,6 @@ if(BUILD_SYCL_TLA_KERNELS)
     # branch on it (mirrors intel_gpu_cri DPC++ target above).
     list(APPEND SYCL_TLA_KERNELS_COMPILE_FLAGS
          "-D__SYCL_TARGET_INTEL_GPU_CRI__")
-    # The intel_gpu_cri SYCL architecture enumerator only exists on CRI-enabled
-    # oneAPI toolchains. Detect it so is_xe3p_arch() (csrc/utils.h) can
-    # reference it when available and fall back to intel_gpu_nvl_p otherwise.
-    get_filename_component(_icpx_bindir "${CMAKE_CXX_COMPILER}" DIRECTORY)
-    set(_sycl_arch_def
-        "${_icpx_bindir}/../include/sycl/ext/oneapi/experimental/device_architecture.def"
-    )
-    if(EXISTS "${_sycl_arch_def}")
-      file(STRINGS "${_sycl_arch_def}" _cri_arch_lines
-           REGEX "intel_gpu_cri[^_]")
-      if(_cri_arch_lines)
-        message(STATUS "Toolchain supports intel_gpu_cri architecture")
-        list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_HAS_INTEL_GPU_CRI)
-      else()
-        message(
-          STATUS
-            "Toolchain lacks intel_gpu_cri; is_xe3p_arch() will use intel_gpu_nvl_p only"
-        )
-      endif()
-    endif()
     # Xe3p can use 512-GRF per thread on newer toolchains, but pin to 256-GRF
     # for now so the XE3 kernels build consistently across oneAPI releases.
     set(VLLM_XPU_XE3P_GRF_SIZE 256)
@@ -497,6 +481,30 @@ if(BUILD_SYCL_TLA_KERNELS)
   endif()
   list(APPEND VLLM_GPU_COMPILE_FLAGS ${SYCL_TLA_COMPILE_OPTIONS})
 
+endif()
+
+# Probe outside the TLA block: the quant asm dispatch in _C (is_xe3p_arch) needs
+# this define even when the SYCL-TLA kernels are disabled.
+if(VLLM_XPU_ENABLE_XE3P)
+  # The intel_gpu_cri SYCL architecture enumerator only exists on CRI-enabled
+  # oneAPI toolchains. Detect it so is_xe3p_arch() (csrc/utils.h) can reference
+  # it when available and fall back to intel_gpu_nvl_p otherwise.
+  get_filename_component(_icpx_bindir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  set(_sycl_arch_def
+      "${_icpx_bindir}/../include/sycl/ext/oneapi/experimental/device_architecture.def"
+  )
+  if(EXISTS "${_sycl_arch_def}")
+    file(STRINGS "${_sycl_arch_def}" _cri_arch_lines REGEX "intel_gpu_cri[^_]")
+    if(_cri_arch_lines)
+      message(STATUS "Toolchain supports intel_gpu_cri architecture")
+      list(APPEND VLLM_GPU_COMPILE_FLAGS -DVLLM_XPU_HAS_INTEL_GPU_CRI)
+    else()
+      message(
+        STATUS
+          "Toolchain lacks intel_gpu_cri; is_xe3p_arch() will use intel_gpu_nvl_p only"
+      )
+    endif()
+  endif()
 endif()
 
 # Feature compile defines — these guard op registrations and interface code so
@@ -578,6 +586,43 @@ endif()
 #
 
 #
+# quant_asm_xe_3 shared library — Xe3(p)-only hand-written asm quant impl.
+#
+if(VLLM_XPU_ENABLE_XE3P
+   AND BASIC_KERNELS_ENABLED
+   AND BUILD_QUANT_ASM_XE3)
+  message(STATUS "Enabling quant_asm_xe_3 library (Xe3 asm quant impl).")
+
+  set(QUANT_ASM_SRC "csrc/quant_asm_entry.cpp")
+
+  add_library(quant_asm_xe_3 SHARED ${QUANT_ASM_SRC})
+  set_property(TARGET quant_asm_xe_3 PROPERTY CXX_STANDARD 20)
+
+  target_compile_options(quant_asm_xe_3 PRIVATE ${VLLM_GPU_COMPILE_FLAGS} -fPIC)
+  # The asm headers key on VLLM_XPU_ENABLE_XE3; define it for this library only.
+  target_compile_definitions(quant_asm_xe_3 PRIVATE VLLM_XPU_ENABLE_XE3=1)
+  target_include_directories(quant_asm_xe_3 PRIVATE csrc
+                                                    ${VLLM_XPU_INCLUDE_DIR})
+
+  target_link_libraries(quant_asm_xe_3 PRIVATE torch ${TORCH_LIBRARIES})
+
+  # Xe3-only AOT device link flags. Unlike VLLM_GPU_LINK_FLAGS (which may also
+  # carry Xe2 devices such as bmg/pvc in a combined build), this library is a
+  # pure Xe3(p) asm impl and must only AOT-compile for Xe3 devices (cri/nvl).
+  set(QUANT_ASM_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS})
+  if(AOT_DEVICES AND XE3_AOT_DEVICES)
+    list(APPEND QUANT_ASM_LINK_FLAGS "-device ${XE3_AOT_DEVICES}")
+  endif()
+  target_link_options(quant_asm_xe_3 PRIVATE ${QUANT_ASM_LINK_FLAGS})
+
+  # Ship alongside the extensions; global rpath is already $ORIGIN.
+  set_target_properties(quant_asm_xe_3 PROPERTIES LIBRARY_OUTPUT_DIRECTORY
+                                                  "${CMAKE_BINARY_DIR}/")
+  install(TARGETS quant_asm_xe_3 LIBRARY DESTINATION vllm_xpu_kernels
+                                         COMPONENT quant_asm_xe_3)
+endif()
+
+#
 # _C extension
 #
 if(BASIC_KERNELS_ENABLED)
@@ -592,6 +637,7 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/torch_bindings.cpp"
       "csrc/quantization/fp8/fp8_quant.cpp"
       "csrc/quantization/fp4/mxfp4_quant.cpp"
+      "csrc/quant_dispatch.cpp"
       "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cpp"
       "csrc/quantization/fused_kernels/fused_silu_mul_mxfp4_quant.cpp"
       "csrc/xpu_view.cpp"
@@ -623,6 +669,18 @@ if(BASIC_KERNELS_ENABLED)
     USE_SABI
     3
     WITH_SOABI)
+
+  target_compile_definitions(_C PRIVATE VLLM_FP8_QUANT_DISABLE_ASM=1
+                                        VLLM_MXFP4_QUANT_DISABLE_ASM=1)
+
+  if(VLLM_XPU_ENABLE_XE3P AND TARGET quant_asm_xe_3)
+    target_link_libraries(_C PRIVATE quant_asm_xe_3)
+    target_compile_definitions(_C PRIVATE VLLM_QUANT_ASM_AVAILABLE=1)
+  elseif(VLLM_XPU_ENABLE_XE3P)
+    message(
+      STATUS
+        "quant_asm_xe_3 disabled; _C built without VLLM_QUANT_ASM_AVAILABLE.")
+  endif()
 
 endif()
 

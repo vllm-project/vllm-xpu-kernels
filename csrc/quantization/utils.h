@@ -14,6 +14,30 @@ struct alignas(vec_size * sizeof(scalar_t)) vec_n_t {
 template <typename scalar_t>
 using vec4_t = vec_n_t<scalar_t, 4>;
 
+// N one-byte outputs (e.g. fp8) packed into 32-bit words and written with one
+// N-byte store. Assembling a vec_n_t of one-byte elements costs a register
+// move per byte, which made vectorized fp8 stores slower than scalar ones on
+// some GPUs; shifting into words keeps the vector store cheap everywhere.
+template <int N>
+struct PackedBytes {
+  static_assert(N % 4 == 0, "PackedBytes needs a multiple of 4 bytes");
+  uint32_t words[N / 4] = {};
+
+  inline void set(int i, uint8_t byte) {
+    words[i / 4] |= static_cast<uint32_t>(byte) << ((i % 4) * 8);
+  }
+
+  // dst must be N-byte aligned.
+  inline void store(void* dst) const {
+    vec_n_t<uint32_t, N / 4> v;
+#pragma unroll
+    for (int w = 0; w < N / 4; ++w) {
+      v.val[w] = words[w];
+    }
+    *reinterpret_cast<vec_n_t<uint32_t, N / 4>*>(dst) = v;
+  }
+};
+
 template <int VEC_SIZE, typename InT, typename OutT, typename ScaOp>
 struct DefaultVecOp {
   ScaOp scalar_op;
@@ -128,6 +152,23 @@ inline int64_t fused_quant_block_size(
       wg, std::max((work_items + 31) / 32 * 32, static_cast<int64_t>(32)));
   return std::min(
       std::max(wg, static_cast<int64_t>(32)), static_cast<int64_t>(1024));
+}
+
+// For the fused norm-and-quant kernels, which run one work-group per row.
+// When the rows cannot fill the device, spreading each row over up to 1024
+// lanes cuts latency more than packing several items into each lane.
+inline int64_t fused_norm_quant_block_size(
+    int64_t num_rows,
+    int eu_count,
+    int64_t work_items,
+    int items_per_wi,
+    bool reduces_over_group) {
+  if (num_rows < eu_count) {
+    return std::min(
+        std::max((work_items + 31) / 32 * 32, static_cast<int64_t>(32)),
+        static_cast<int64_t>(1024));
+  }
+  return fused_quant_block_size(work_items, items_per_wi, reduces_over_group);
 }
 
 template <typename Fn>

@@ -109,3 +109,42 @@ def test_silu_and_mul_mxfp4_quant(
         ref_deq = ref_f * ref_scales_e
         ops_deq = ops_f * ops_scales_e
         torch.testing.assert_close(ref_deq, ops_deq, atol=0.5, rtol=0.5)
+
+
+@pytest.mark.parametrize("num_tokens", [1, 83])
+@pytest.mark.parametrize("hidden_size", [128, 5120])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("swiglu_limit", [1e-8, 0.1, 3.3, 7.0])
+@pytest.mark.parametrize("column_major_scale", [False, True])
+@torch.inference_mode()
+def test_silu_and_mul_mxfp4_quant_swiglu_limit(
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    swiglu_limit: float,
+    column_major_scale: bool,
+) -> None:
+    """The in-kernel SwiGLU limit is bitwise identical to the eager clamp."""
+    seed_everything(0)
+    torch.set_default_device(XPU_DEVICES[0])
+    x = torch.randn(num_tokens, hidden_size * 2, dtype=dtype) * 8.0
+    num_groups = hidden_size // GROUP_SIZE
+
+    def _run(inp, limit):
+        out = torch.empty(num_tokens, hidden_size // 2, dtype=torch.uint8)
+        if column_major_scale:
+            scales = torch.empty(num_groups, num_tokens,
+                                 dtype=torch.float32).t()
+        else:
+            scales = torch.empty(num_tokens, num_groups, dtype=torch.float32)
+        torch.ops._C.silu_and_mul_mxfp4_quant(out, inp, scales, GROUP_SIZE,
+                                              EPS, limit)
+        return out, scales
+
+    x_ref = x.clone()
+    x_ref[:, :hidden_size].clamp_(max=swiglu_limit)
+    x_ref[:, hidden_size:].clamp_(min=-swiglu_limit, max=swiglu_limit)
+    ref_q, ref_s = _run(x_ref, None)
+    out_q, out_s = _run(x, swiglu_limit)
+    torch.testing.assert_close(out_s, ref_s, atol=0, rtol=0)
+    torch.testing.assert_close(out_q, ref_q, atol=0, rtol=0)

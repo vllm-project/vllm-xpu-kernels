@@ -63,11 +63,20 @@ struct MoEScaleLayout {
            static_cast<int64_t>(k) * ld + (row - src[e]);
   }
 
-  void store(int row, int k, float pow2_scale) const {
+  // e8m0 encoding of a power-of-two scale: the raw float32 exponent field.
+  static uint8_t encode(float pow2_scale) {
+    return static_cast<uint8_t>(
+        (sycl::bit_cast<uint32_t>(pow2_scale) >> 23) & 0xFFu);
+  }
+
+  void store_byte(int row, int k, uint8_t e8m0) const {
     const int64_t idx = offset(row, k);
     if (idx < 0) return;
-    scale_e8m0[idx] = static_cast<uint8_t>(
-        (sycl::bit_cast<uint32_t>(pow2_scale) >> 23) & 0xFFu);
+    scale_e8m0[idx] = e8m0;
+  }
+
+  void store(int row, int k, float pow2_scale) const {
+    store_byte(row, k, encode(pow2_scale));
   }
 };
 

@@ -15,7 +15,8 @@ except ImportError as e:
     FUSEDMOE_AVAILABLE = False
 
 from .moe_utils import (canonical_activation, dequant_fp8_block_act,
-                        dequant_mxfp8, fused_act_quant_xpu, moe_activation_op,
+                        dequant_mxfp8, fused_act_quant_applies_swiglu_limit,
+                        fused_act_quant_xpu, moe_activation_op,
                         mxfp_scale_padded_rows, quant_act_xpu, ref_fused_moe)
 
 REF_FUSED_MOE_ENV = "VLLM_XPU_FUSED_MOE_USE_REF"
@@ -446,6 +447,10 @@ class XpuFusedMoe:
                             a2_scale=a2_scale,
                             gemm1_clamp_limit=self.gemm1_clamp_limit)
 
+    def _apply_swiglu_limit(self, gemm1_output, limit):
+        gemm1_output[:, :self.inter_size].clamp_(max=limit)
+        gemm1_output[:, self.inter_size:].clamp_(min=-limit, max=limit)
+
     def _apply_kernel(
         self,
         output,
@@ -572,12 +577,17 @@ class XpuFusedMoe:
         if activation_hook is not None:
             activation_hook(gemm1_output, unpermuted_row_to_permuted_row)
 
-        # Apply swiglu_limit clamping before activation
-        if self.gemm1_clamp_limit is not None and self.gemm1_clamp_limit > 0:
-            gate = gemm1_output[:, :self.inter_size]
-            up = gemm1_output[:, self.inter_size:]
-            gate.clamp_(max=self.gemm1_clamp_limit)
-            up.clamp_(min=-self.gemm1_clamp_limit, max=self.gemm1_clamp_limit)
+        # Apply swiglu_limit clamping before activation. The fused act+quant
+        # kernels of the block-scaled recipes clamp while reading gemm1_output,
+        # which saves two read-modify-write passes over it.
+        clamp_limit = (self.gemm1_clamp_limit
+                       if self.gemm1_clamp_limit is not None
+                       and self.gemm1_clamp_limit > 0 else None)
+        clamp_in_act = (clamp_limit is not None and act_quant
+                        and fused_act_quant_applies_swiglu_limit(
+                            self.activation, self.recipe))
+        if clamp_limit is not None and not clamp_in_act:
+            self._apply_swiglu_limit(gemm1_output, clamp_limit)
 
         # act. When the recipe has a fused SiLU+quant kernel the bf16
         # intermediate is never materialized, so the activation and the gemm2
@@ -587,8 +597,13 @@ class XpuFusedMoe:
             fused_act = fused_act_quant_xpu(self.activation, gemm1_output,
                                             self.recipe, expert_scale_desc,
                                             padded_scale_rows,
-                                            static_scale=a2_scale)
+                                            static_scale=a2_scale,
+                                            swiglu_limit=clamp_limit
+                                            if clamp_in_act else None)
         if fused_act is None:
+            if clamp_in_act:
+                # The fused kernel declined this shape, so clamp eagerly.
+                self._apply_swiglu_limit(gemm1_output, clamp_limit)
             act_output = torch.empty(
                 (num_moe_inputs, self.inter_size * self.inter_size_scale),
                 dtype=gemm1_output.dtype,

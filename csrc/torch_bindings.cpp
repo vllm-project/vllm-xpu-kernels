@@ -136,7 +136,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? scale_ub=None, "
       "bool is_scale_transposed=False, "
       "bool scale_ue8m0=False, "
-      "Tensor? expert_scale_desc=None) -> ()");
+      "Tensor? expert_scale_desc=None, "
+      "float? swiglu_limit=None) -> ()");
   ops.impl(
       "silu_and_mul_per_block_quant",
       torch::kXPU,
@@ -145,7 +146,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "silu_and_mul_mxfp4_quant("
       "Tensor! out, Tensor input, Tensor! scales, "
-      "int group_size, float eps=1e-10) -> ()");
+      "int group_size, float eps=1e-10, float? swiglu_limit=None) -> ()");
   ops.impl("silu_and_mul_mxfp4_quant", torch::kXPU, &silu_and_mul_mxfp4_quant);
 
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
@@ -231,6 +232,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "-> ()");
   ops.impl(
       "per_token_group_quant_mxfp4", torch::kXPU, &per_token_group_quant_mxfp4);
+
+  // As above, but folds silu_and_mul over a [M, 2N] gate/up input into the
+  // quantiser so the bf16 activation is never materialised.
+  ops.def(
+      "silu_and_mul_per_token_group_quant_mxfp4(Tensor input, Tensor! "
+      "output_q, Tensor! output_s, int group_size, float eps, "
+      "Tensor? expert_scale_desc=None, float? swiglu_limit=None) -> ()");
+  ops.impl(
+      "silu_and_mul_per_token_group_quant_mxfp4",
+      torch::kXPU,
+      &silu_and_mul_per_token_group_quant_mxfp4);
 
   // swigluoai_and_mul
   ops.def(

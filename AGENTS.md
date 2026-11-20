@@ -75,6 +75,12 @@ Important build environment variables:
 - `BUILD_SYCL_TLA_KERNELS`: enable or disable SYCL-TLA based kernels.
 - `VLLM_XPU_ENABLE_XE2` and `VLLM_XPU_ENABLE_XE3P`: architecture-family
   toggles.
+- `BUILD_QUANT_ASM_XE3`: build `libquant_asm_xe_3`, which recompiles the fp8,
+  MXFP4/MXFP8, fused quant, and `reshape_and_cache_flash` sources with the Xe3p
+  inline-asm conversion paths. It is AOT compiled for
+  `VLLM_XPU_XE3P_AOT_DEVICES` only and needs `VLLM_XPU_ENABLE_XE3P` and
+  `BASIC_KERNELS_ENABLED`. `_C` routes these ops to it at runtime on Xe3p
+  devices; set `VLLM_XPU_DISABLE_QUANT_ASM=1` to force the portable `_C` path.
 - `BASIC_KERNELS_ENABLED`, `FA2_KERNELS_ENABLED`, `MOE_KERNELS_ENABLED`,
   `GDN_KERNELS_ENABLED`, `MQA_LOGITS_KERNELS_ENABLED`,
   `XPU_SPECIFIC_KERNELS_ENABLED`, `XPUMEM_ALLOCATOR_ENABLED`: extension or
