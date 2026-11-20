@@ -38,8 +38,26 @@ Kernels are written in SYCL/DPC++ and leverage [oneDNN](https://github.com/oneap
 | **Mixture of Experts** | TopK scoring (softmax/sigmoid), grouped TopK, fused grouped TopK; MoE align sum, MoE gather, expert remapping |
 | **LoRA** | LoRA operator support |
 | **Quantization** | FP8, MxFP4 quantization and GEMM |
-| **GEMM** | Grouped GEMM |
+| **GEMM** | Grouped GEMM; native Xe2 fixed-capacity batched GEMM (FP16/BF16) |
 | **Misc** | TopK per row, memory utilities |
+
+### Xe2 batched expert GEMM
+
+`torch.ops._xpu_C.cutlass_batched_gemm_interface(input, weight, bias, output,
+rows_per_expert, tile_m=0)` computes independent expert GEMMs using the native Xe2
+DPAS implementation. Input, weight, and output are contiguous tensors of
+shape `[E,T,K]`, `[E,K,N]`, and `[E,T,N]`, with matching FP16 or BF16 dtype.
+Optional bias has shape `[E,N]` and the same dtype. K and N must be divisible
+by 8. All tensors must be on the same Xe2 XPU device.
+
+`rows_per_expert` is a contiguous device int32 tensor `[E]`; the caller must
+provide counts in `[0,T]`. Only the first `rows_per_expert[e]` output rows
+are written for each expert; padding is left untouched. Counts remain on
+the device and may change between graph replays without changing shapes.
+The optional `tile_m` selects an M tile of 8, 16, 32, 64, 128, or 256 for
+microbenchmark tuning; 0 uses automatic selection. Batched scheduling uses
+bounded per-expert workgroups without an atomic counter or reset kernel.
+The existing compact grouped GEMM API and default dispatch are unchanged.
 
 ## Requirements
 

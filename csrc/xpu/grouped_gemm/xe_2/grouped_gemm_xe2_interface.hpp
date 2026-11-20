@@ -37,6 +37,7 @@
 #include "csrc/utils.h"
 
 #include <cute/tensor.hpp>
+#include <algorithm>
 #include <random>
 
 #include <cute/util/compat.hpp>
@@ -99,7 +100,8 @@ void MoEGEMMLauncher(
     const int* rows_per_expert,
     const int num_experts,
     const int group_size,
-    int32_t* atomic_buffer) {
+    int32_t* atomic_buffer,
+    int64_t expert_capacity) {
   using ElementA_non_CV = cutlass::platform::remove_cv_t<ElementA>;
   auto op = XE_DPAS_TT<8, float, ElementA_non_CV>{};
 
@@ -124,6 +126,16 @@ void MoEGEMMLauncher(
   sycl::range<3> local(1, 1, MaxThreadsPerWorkgroup);
   sycl::range<3> global(
       1, sm_count * MaxThreadsPerSM / MaxThreadsPerWorkgroup, 1);
+  if (expert_capacity > 0) {
+    const int64_t n_tiles = (gemm_n + get<1>(WGTile{}) - 1) / get<1>(WGTile{});
+    const int64_t m_tiles =
+        (expert_capacity + get<0>(WGTile{}) - 1) / get<0>(WGTile{});
+    // Keep launch size bounded when decode uses a large padded capacity.
+    const int64_t groups_per_expert =
+        std::max(n_tiles, int64_t(global[1] * 2 / num_experts));
+    global = sycl::range<3>(
+        num_experts, std::min(m_tiles * n_tiles, groups_per_expert), 1);
+  }
 
   namespace syclex = sycl::ext::oneapi::experimental;
   namespace intelex = sycl::ext::intel::experimental;
@@ -169,7 +181,8 @@ void MoEGEMMLauncher(
               gemm_n,
               gemm_k,
               atomic_buffer,
-              local_mem);
+              local_mem,
+              expert_capacity);
         });
   });
 }
@@ -183,7 +196,9 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     at::Tensor& rows_per_expert,
     int64_t N,
     int64_t K,
-    int64_t num_experts) {
+    int64_t num_experts,
+    int64_t expert_capacity = 0,
+    int64_t tile_m = 0) {
   auto& dpcpp_queue =
       at::xpu::getCurrentXPUStream(ptr_A.device().index()).queue();
   auto A_dtype = ptr_A.dtype();
@@ -249,11 +264,13 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     TORCH_CHECK(ptr_bias->size(1) == N, "ptr_bias.size(1) must match N");
   }
 
-  // Must be zeroed before kernel launch. Workgroup execution order
-  // is non-deterministic, so initializing in the definition is the most
-  // safe place to avoid any race condition as well as garbage data
-  at::Tensor atomic_buffer =
-      at::zeros({static_cast<long>(1)}, ptr_A.options().dtype(at::kInt));
+  // Compact scheduling needs a fresh counter on every launch.
+  at::Tensor atomic_buffer;
+  int32_t* atomic_ptr = nullptr;
+  if (expert_capacity == 0) {
+    atomic_buffer = at::zeros({1}, ptr_A.options().dtype(at::kInt));
+    atomic_ptr = atomic_buffer.data_ptr<int32_t>();
+  }
 
 #define MoEGEMMLauncherCallER(                                                 \
     LayoutA,                                                                   \
@@ -279,7 +296,8 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
       reinterpret_cast<int*>(rows_per_expert.data_ptr()),                      \
       num_experts,                                                             \
       group_size,                                                              \
-      static_cast<int*>(atomic_buffer.data_ptr()));
+      atomic_ptr,                                                              \
+      expert_capacity);
 
   if (is_B_int4 || is_B_mxfp4) {
     TORCH_CHECK(ptr_scales.has_value(), "w8a16 grouped gemm must have scales");
@@ -432,7 +450,8 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
       reinterpret_cast<int*>(rows_per_expert.data_ptr()),                      \
       num_experts,                                                             \
       group_size,                                                              \
-      static_cast<int*>(atomic_buffer.data_ptr()));
+      atomic_ptr,                                                              \
+      expert_capacity);
 
 #define W8MXFP8LauncherCallER(policy)                                     \
   if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {            \
@@ -523,7 +542,8 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
       reinterpret_cast<int*>(rows_per_expert.data_ptr()),                      \
       num_experts,                                                             \
       group_size,                                                              \
-      static_cast<int*>(atomic_buffer.data_ptr()));
+      atomic_ptr,                                                              \
+      expert_capacity);
   } else if (is_B_block_fp8) {
     TORCH_CHECK(
         ptr_scales.has_value(), "block-fp8 grouped gemm must have scales");
@@ -712,7 +732,51 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
         scalar_t);                   \
   }
 
-    if (A_avg_M <= 8) {
+    if (expert_capacity > 0 && tile_m == 0) {
+      if (expert_capacity <= 8) {
+        tile_m = 8;
+      } else if (expert_capacity <= 16) {
+        tile_m = 16;
+      } else if (expert_capacity <= 32) {
+        tile_m = 32;
+      } else if (
+          expert_capacity <= 64 || (B_N <= 512 && expert_capacity <= 256)) {
+        tile_m = 64;
+      } else if (
+          expert_capacity <= 128 || B_N <= 512 ||
+          (A_K <= 512 && expert_capacity <= 256)) {
+        tile_m = 128;
+      }
+      // Retain the wide 256-row policies for large, compute-heavy batches.
+    }
+    if (expert_capacity > 0 && tile_m != 0) {
+      switch (tile_m) {
+        case 8: {
+          W16A16LauncherCallER(w16a16_policy_m_8);
+          break;
+        }
+        case 16: {
+          W16A16LauncherCallER(w16a16_policy_m_16);
+          break;
+        }
+        case 32: {
+          W16A16LauncherCallER(w16a16_policy_m_32);
+          break;
+        }
+        case 64: {
+          W16A16LauncherCallER(w16a16_batched_policy<64>);
+          break;
+        }
+        case 128: {
+          W16A16LauncherCallER(w16a16_batched_policy<128>);
+          break;
+        }
+        case 256: {
+          W16A16LauncherCallER(w16a16_policy_n_128);
+          break;
+        }
+      }
+    } else if (A_avg_M <= 8) {
       using policy = w16a16_policy_m_16;
       W16A16LauncherCallER(policy);
     } else if (A_avg_M <= 16) {

@@ -86,7 +86,8 @@ CUTE_DEVICE void MoEGEMM(
     const int32_t gemm_n,
     const int32_t gemm_k,
     int32_t* atomic_buffer,
-    const sycl::local_accessor<int32_t, 1>& slm_mem_const) {
+    const sycl::local_accessor<int32_t, 1>& slm_mem_const,
+    const int64_t expert_capacity) {
   constexpr char actual_layout_of_B = LayoutKindB ^ ('R' ^ 'C');
   static constexpr bool is_B_4bits =
       (TENSOR_B_DTYPE == B_DTYPE::INT4 || TENSOR_B_DTYPE == B_DTYPE::MXFP4);
@@ -96,7 +97,7 @@ CUTE_DEVICE void MoEGEMM(
   auto wg_tile_m = get<0>(wg_tile);
   auto wg_tile_n = get<1>(wg_tile);
 
-  int group_id = item.get_group_linear_id();
+  int group_id = item.get_group(1);
   int gemm_n_pad = (gemm_n + wg_tile_n - 1) / wg_tile_n * wg_tile_n;
   int group_m_id = (group_id * wg_tile_n) / gemm_n_pad;
   int group_range = item.get_group_range(1);
@@ -109,7 +110,9 @@ CUTE_DEVICE void MoEGEMM(
       slm_mem_const.template get_multi_ptr<sycl::access::decorated::no>()
           .get());
 
-  for (int i = 0; i < num_experts; ++i) {
+  const int first_expert = expert_capacity > 0 ? item.get_group(0) : 0;
+  const int last_expert = expert_capacity > 0 ? first_expert + 1 : num_experts;
+  for (int i = first_expert; i < last_expert; ++i) {
     int gemm_m = rows_per_expert[i];
     int cumsum_rows_for_experts = pre_rows + gemm_m;
     int cumsum_tiles_for_experts =
@@ -128,11 +131,14 @@ CUTE_DEVICE void MoEGEMM(
     if constexpr (is_B_4bits) {
       B_offset /= 2;
     }
+    const int64_t row_offset =
+        expert_capacity > 0 ? expert_id * expert_capacity : pre_rows;
     ElementA* ptr_A_curr_batch =
-        const_cast<ElementA*>(Activations) + pre_rows * gemm_k;
+        const_cast<ElementA*>(Activations) + row_offset * gemm_k;
     ElementB* ptr_B_curr_batch = const_cast<ElementB*>(Weights) + B_offset;
-    ElementD* ptr_D_curr_batch = Outputs + pre_rows * gemm_n;
-    ElementS* ptr_Scales_curr_batch = const_cast<ElementS*>(Scales) + expert_id;
+    ElementD* ptr_D_curr_batch = Outputs + row_offset * gemm_n;
+    ElementS* ptr_Scales_curr_batch =
+        Scales == nullptr ? nullptr : const_cast<ElementS*>(Scales) + expert_id;
     if constexpr (is_B_4bits) {
       // Scales layout [E, N, K/group_size] packed with 4-bit B.
       ptr_Scales_curr_batch =
@@ -216,11 +222,15 @@ CUTE_DEVICE void MoEGEMM(
             mma);
       }
 
-      if (local_id == 0) {
-        slm_mem[0] = cutlass::atomicAdd(atomic_buffer, 1);
+      if (expert_capacity > 0) {
+        group_id += group_range;
+      } else {
+        if (local_id == 0) {
+          slm_mem[0] = cutlass::atomicAdd(atomic_buffer, 1);
+        }
+        sycl::group_barrier(item.get_group());
+        group_id = group_range + slm_mem[0];
       }
-      sycl::group_barrier(item.get_group());
-      group_id = group_range + slm_mem[0];
       group_m_id = (group_id * wg_tile_n) / gemm_n_pad;
     }
     pre_rows = cumsum_rows_for_experts;
