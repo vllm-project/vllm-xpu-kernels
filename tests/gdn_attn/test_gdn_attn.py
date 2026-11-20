@@ -1961,3 +1961,186 @@ def test_gdn_attention_null_block_padding(path, dtype):
     torch.testing.assert_close(conv_state, ref_conv_state)
     torch.testing.assert_close(ssm_state, ref_ssm_state)
     torch.testing.assert_close(out[:num_real * K], ref_out)
+
+
+@pytest.mark.parametrize("reorder_input", REORDER_INPUT)
+@pytest.mark.parametrize("ssm_state_is_fp32", SSM_STATE_IS_FP32)
+@pytest.mark.parametrize("conv_state_layout", CONV_STATE_LAYOUTS)
+def test_gdn_attention_prefill_checkpoints(reorder_input, ssm_state_is_fp32,
+                                           conv_state_layout):
+    """Internal prefill checkpoints must hold the conv/ssm state after the
+    first ``checkpoint_offsets[row]`` tokens of the row, without changing the
+    final state or output."""
+    device = "xpu"
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    ssm_state_dtype = torch.float32 if ssm_state_is_fp32 else dtype
+    num_k_heads, num_v_heads, head_k_dim, head_v_dim = 2, 4, 128, 128
+    width, tp_size, cache_batch_size = 4, 1, 32
+
+    # One decode followed by prefills: checkpoint mid-sequence, at the end of
+    # the sequence, none, and one whose checkpoint slot is the null block.
+    seq_lens = [1, 200, 64, 100, 30, 150]
+    has_init = [True, True, False, True, False, True]
+    ckpt_offsets = [0, 128, 64, 64, 0, 128]
+    state_ids = [3, 5, 7, 9, 11, 13]
+    ckpt_ids = [0, 20, 21, 22, 0, 0]
+    num_decodes, num_prefills = 1, len(seq_lens) - 1
+    num_actual_tokens = sum(seq_lens)
+
+    qkvz_size = num_k_heads * (2 * head_k_dim +
+                               2 * head_v_dim * num_v_heads // num_k_heads)
+    ba_size = 2 * num_v_heads
+    qkv_size = num_k_heads * (2 * head_k_dim +
+                              head_v_dim * num_v_heads // num_k_heads)
+    qkvz = torch.randn((num_actual_tokens, qkvz_size),
+                       dtype=dtype,
+                       device=device)
+    ba = torch.randn((num_actual_tokens, ba_size), dtype=dtype, device=device)
+    conv_weights = torch.randn((qkv_size, width), dtype=dtype, device=device)
+    A_log = torch.randn((num_v_heads), dtype=torch.float32, device=device)
+    dt_bias = torch.randn((num_v_heads), dtype=dtype, device=device)
+    ref_conv_state = torch.randn((cache_batch_size, width - 1, qkv_size),
+                                 dtype=dtype,
+                                 device=device)
+    ref_ssm_state = torch.randn(
+        (cache_batch_size, num_v_heads, head_v_dim, head_k_dim),
+        dtype=ssm_state_dtype,
+        device=device)
+    init_conv_state = ref_conv_state.clone()
+    init_ssm_state = ref_ssm_state.clone()
+    conv_state = to_conv_state_layout(ref_conv_state.clone(),
+                                      conv_state_layout)
+    ssm_state = ref_ssm_state.clone()
+
+    def i32(values):
+        return torch.tensor(values, dtype=torch.int32, device=device)
+
+    query_start_loc = i32([0] + torch.tensor(seq_lens).cumsum(0).tolist())
+    has_initial_state = torch.tensor(has_init, device=device)
+    core_attn_out = torch.zeros((num_actual_tokens, num_v_heads, head_v_dim),
+                                dtype=dtype,
+                                device=device)
+    z = torch.empty_like(core_attn_out)
+    torch.ops._xpu_C.gdn_attention(
+        core_attn_out,
+        z,
+        qkvz,
+        ba,
+        num_k_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_state=conv_state,
+        ssm_state=ssm_state,
+        conv_weights=conv_weights,
+        conv_bias=None,
+        activation="silu",
+        A_log=A_log,
+        dt_bias=dt_bias,
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
+        num_spec_decodes=0,
+        has_initial_state=has_initial_state,
+        non_spec_query_start_loc=query_start_loc,
+        non_spec_token_indx=None,
+        non_spec_state_indices_tensor=i32(state_ids),
+        spec_query_start_loc=None,
+        spec_token_indx=None,
+        spec_state_indices_tensor=None,
+        num_accepted_tokens=None,
+        num_actual_tokens=num_actual_tokens,
+        tp_size=tp_size,
+        reorder_input=reorder_input,
+        checkpoint_offsets=i32(ckpt_offsets),
+        checkpoint_state_indices=i32(ckpt_ids))
+
+    common = dict(num_k_heads=num_k_heads,
+                  num_v_heads=num_v_heads,
+                  head_k_dim=head_k_dim,
+                  head_v_dim=head_v_dim,
+                  conv_weights=conv_weights,
+                  conv_bias=None,
+                  activation="silu",
+                  A_log=A_log,
+                  dt_bias=dt_bias,
+                  tp_size=tp_size,
+                  reorder_input=reorder_input)
+    ref_core_attn_out = torch.zeros_like(core_attn_out)
+    ref_gdn_attention(ref_core_attn_out,
+                      torch.empty_like(z),
+                      qkvz,
+                      ba,
+                      conv_state=ref_conv_state,
+                      ssm_state=ref_ssm_state,
+                      num_prefills=num_prefills,
+                      num_decodes=num_decodes,
+                      has_initial_state=has_initial_state,
+                      non_spec_query_start_loc=query_start_loc,
+                      non_spec_state_indices_tensor=i32(state_ids),
+                      num_actual_tokens=num_actual_tokens,
+                      **common)
+
+    # Reference checkpoints: run each checkpointed row's prefix alone, from
+    # the row's initial state, into its checkpoint slot.
+    rows = [
+        r for r in range(len(seq_lens)) if ckpt_offsets[r] and ckpt_ids[r]
+    ]
+    ckpt_conv_state = init_conv_state.clone()
+    ckpt_ssm_state = init_ssm_state.clone()
+    for r in rows:
+        ckpt_conv_state[ckpt_ids[r]] = init_conv_state[state_ids[r]]
+        ckpt_ssm_state[ckpt_ids[r]] = init_ssm_state[state_ids[r]]
+    token_idx = torch.cat([
+        torch.arange(query_start_loc[r], query_start_loc[r] + ckpt_offsets[r])
+        for r in rows
+    ]).to(device)
+    prefix_out = torch.zeros((token_idx.numel(), num_v_heads, head_v_dim),
+                             dtype=dtype,
+                             device=device)
+    ref_gdn_attention(prefix_out,
+                      torch.empty_like(prefix_out),
+                      qkvz[token_idx],
+                      ba[token_idx],
+                      conv_state=ckpt_conv_state,
+                      ssm_state=ckpt_ssm_state,
+                      num_prefills=len(rows),
+                      num_decodes=0,
+                      has_initial_state=has_initial_state[rows],
+                      non_spec_query_start_loc=i32(
+                          [0] +
+                          torch.tensor([ckpt_offsets[r]
+                                        for r in rows]).cumsum(0).tolist()),
+                      non_spec_state_indices_tensor=i32(
+                          [ckpt_ids[r] for r in rows]),
+                      num_actual_tokens=token_idx.numel(),
+                      **common)
+
+    atol = rtol = 5e-2
+    conv_state = conv_state_as_sd(conv_state, conv_state_layout)
+    torch.testing.assert_close(core_attn_out,
+                               ref_core_attn_out,
+                               atol=atol,
+                               rtol=rtol)
+    for state_id in state_ids:
+        torch.testing.assert_close(conv_state[state_id],
+                                   ref_conv_state[state_id],
+                                   atol=atol,
+                                   rtol=rtol)
+        torch.testing.assert_close(ssm_state[state_id],
+                                   ref_ssm_state[state_id],
+                                   atol=atol,
+                                   rtol=rtol)
+    for r in rows:
+        torch.testing.assert_close(conv_state[ckpt_ids[r]],
+                                   ckpt_conv_state[ckpt_ids[r]],
+                                   atol=atol,
+                                   rtol=rtol)
+        torch.testing.assert_close(ssm_state[ckpt_ids[r]],
+                                   ckpt_ssm_state[ckpt_ids[r]],
+                                   atol=atol,
+                                   rtol=rtol)
+    # The null block is never written.
+    torch.testing.assert_close(conv_state[0], init_conv_state[0], atol=0,
+                               rtol=0)
+    torch.testing.assert_close(ssm_state[0], init_ssm_state[0], atol=0, rtol=0)
