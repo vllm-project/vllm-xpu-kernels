@@ -52,6 +52,13 @@ class w16a16_policy_m_32 : public xe_gemm_policy_base {
   using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
 };
 
+template <int TileM>
+class w16a16_batched_policy : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<Int<TileM>, _128, _32>;
+  using SGLayout = Layout<Shape<_4, _2, _1>, Stride<_2, _1, _0>>;
+};
+
 class w8a16_policy : public xe_gemm_policy_base {
  public:
   using WGTile = Shape<_128, _128, _16>;

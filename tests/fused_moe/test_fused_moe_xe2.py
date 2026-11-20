@@ -10,11 +10,90 @@ from tests.utils import format_tc, run_with_xpu_graph, seed_everything
 from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
 
 pytestmark = pytest.mark.skipif(
-    not torch.xpu.is_available() or
-    (not torch.ops._xpu_C.is_bmg(0) and not torch.ops._xpu_C.is_pvc(0)),
+    not torch.xpu.is_available()
+    or (not torch.ops._xpu_C.is_bmg(0) and not torch.ops._xpu_C.is_pvc(0)),
     reason="XE2 CUTLASS tests only run on BMG or PVC.")
 
 DEVICE = "xpu"
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("capacity,k,n", [(1, 128, 128), (37, 136, 264),
+                                          (129, 256, 512), (0, 128, 128)])
+@pytest.mark.parametrize("has_bias", [False, True])
+@pytest.mark.parametrize("tile_m", [0, 8, 16, 32, 64, 128, 256])
+def test_batched_gemm_variable_rows(dtype, capacity, k, n, has_bias, tile_m):
+    """Fixed expert strides must not be confused with packed row offsets."""
+    torch.manual_seed(7)
+    e = 4
+    a = torch.randn((e, capacity, k), device=DEVICE, dtype=dtype) / 10
+    b = torch.randn((e, k, n), device=DEVICE, dtype=dtype) / 10
+    bias = torch.randn(
+        (e, n), device=DEVICE, dtype=dtype) / 10 if has_bias else None
+    counts = torch.tensor([0, capacity, capacity // 2,
+                           min(1, capacity)],
+                          device=DEVICE,
+                          dtype=torch.int32)
+    out = torch.full((e, capacity, n), -17, device=DEVICE, dtype=dtype)
+    torch.ops._xpu_C.cutlass_batched_gemm_interface(a, b, bias, out, counts,
+                                                    tile_m)
+    expected = torch.bmm(a.float(), b.float())
+    if bias is not None:
+        expected += bias.float().unsqueeze(1)
+    valid = torch.arange(capacity, device=DEVICE)[None, :] < counts[:, None]
+    expected = torch.where(valid[:, :, None], expected.to(dtype), -17)
+    torch.testing.assert_close(out, expected, atol=2e-3, rtol=2e-2)
+
+
+@pytest.mark.parametrize("tile_m", [0, 8, 64, 128, 256])
+def test_batched_gemm_graph_changing_counts(tile_m):
+    """Replay must use live device counts, including newly empty experts."""
+    torch.manual_seed(8)
+    capacity = 1025
+    a = torch.randn(
+        (4, capacity, 128), device=DEVICE, dtype=torch.bfloat16) / 10
+    b = torch.randn((4, 128, 256), device=DEVICE, dtype=torch.bfloat16) / 10
+    out = torch.empty((4, capacity, 256), device=DEVICE, dtype=a.dtype)
+    counts = torch.full((4, ), capacity, device=DEVICE, dtype=torch.int32)
+
+    def run():
+        out.zero_()
+        torch.ops._xpu_C.cutlass_batched_gemm_interface(
+            a, b, None, out, counts, tile_m)
+
+    stream = torch.xpu.Stream()
+    stream.wait_stream(torch.xpu.current_stream())
+    with torch.xpu.stream(stream):
+        run()
+    torch.xpu.current_stream().wait_stream(stream)
+    graph = torch.xpu.XPUGraph()
+    with torch.xpu.graph(graph):
+        run()
+    for values in ([0, 1, 17, capacity], [capacity, 0, 2, 0], [0, 0, 0, 0]):
+        counts.copy_(torch.tensor(values, device=DEVICE, dtype=torch.int32))
+        graph.replay()
+        valid = torch.arange(capacity, device=DEVICE)[None, :] < counts[:,
+                                                                        None]
+        expected = torch.bmm(a.float(), b.float()).to(a.dtype)
+        expected.masked_fill_(~valid[:, :, None], 0)
+        torch.testing.assert_close(out, expected, atol=2e-3, rtol=2e-2)
+
+
+def test_batched_gemm_rejects_invalid_metadata():
+    a = torch.empty((2, 4, 128), device=DEVICE, dtype=torch.bfloat16)
+    b = torch.empty((2, 128, 128), device=DEVICE, dtype=a.dtype)
+    out = torch.empty_like(a)
+    counts = torch.full((2, ), 4, device=DEVICE, dtype=torch.int64)
+    with pytest.raises(RuntimeError, match="int32"):
+        torch.ops._xpu_C.cutlass_batched_gemm_interface(
+            a, b, None, out, counts)
+    with pytest.raises(RuntimeError, match="same FP16 or BF16 dtype"):
+        torch.ops._xpu_C.cutlass_batched_gemm_interface(
+            a, b.float(), None, out, counts.int())
+    with pytest.raises(RuntimeError, match="tile_m"):
+        torch.ops._xpu_C.cutlass_batched_gemm_interface(
+            a, b, None, out, counts.int(), 7)
+
 
 # shape for Llama-4-scout
 FUSED_MOE_MNK_FACTORS = [
@@ -270,21 +349,19 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias, activation,
         e,
     )
 
-
     fused_moe_impl = XpuFusedMoe(
-                w13=w13,
-                w13_scales=w13_scales,
-                w13_bias=w13_bias,
-                w2=w2,
-                w2_scales=w2_scales,
-                w2_bias=w2_bias,
-                n_experts_per_token=topk,
-                activation=activation,
-                num_experts=e,
-                activation_situ_beta=4.0 if activation == "situ" else None,
-                activation_situ_linear_beta=(
-                    25.0 if activation == "situ" else None),
-            )
+        w13=w13,
+        w13_scales=w13_scales,
+        w13_bias=w13_bias,
+        w2=w2,
+        w2_scales=w2_scales,
+        w2_bias=w2_bias,
+        n_experts_per_token=topk,
+        activation=activation,
+        num_experts=e,
+        activation_situ_beta=4.0 if activation == "situ" else None,
+        activation_situ_linear_beta=(25.0 if activation == "situ" else None),
+    )
 
     def run(hidden_states, topk_weights, topk_ids, impl=fused_moe_impl):
         output = torch.empty_like(ref_out)
@@ -298,8 +375,8 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias, activation,
 
     # Under graph, routing is zeroed during capture (all tokens -> expert 0).
     moe_inputs = [a, expert_scores, expert_indices]
-    output = (run_with_xpu_graph(run, moe_inputs)
-              if use_graph else run(*moe_inputs))
+    output = (run_with_xpu_graph(run, moe_inputs) if use_graph else run(
+        *moe_inputs))
 
     if dtype == torch.float16:
         rtol = 1e-2
@@ -473,18 +550,18 @@ def test_fused_moe_int4(m, n, k, e, topk, dtype, has_bias):
     ref_out = ref_fused_moe(ref_a, ref_13, w13_bias, ref_2, w2_bias,
                             flat_expert_weights, flat_expert_indices, topk,
                             "silu", e)
-    
+
     fused_moe_impl = XpuFusedMoe(
-                w13=w13,
-                w13_scales=w13_scales,
-                w13_bias=w13_bias,
-                w2=w2,
-                w2_scales=w2_scales,
-                w2_bias=w2_bias,
-                n_experts_per_token=topk,
-                activation="silu",
-                num_experts=e,
-            )
+        w13=w13,
+        w13_scales=w13_scales,
+        w13_bias=w13_bias,
+        w2=w2,
+        w2_scales=w2_scales,
+        w2_bias=w2_bias,
+        n_experts_per_token=topk,
+        activation="silu",
+        num_experts=e,
+    )
 
     output = torch.empty_like(ref_out)
     fused_moe_impl.apply(
@@ -596,19 +673,18 @@ def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias, activation):
     )
 
     fused_moe_impl = XpuFusedMoe(
-                w13=w13.view(torch.float4_e2m1fn_x2),
-                w13_scales=w13_scales,
-                w13_bias=w13_bias,
-                w2=w2.view(torch.float4_e2m1fn_x2),
-                w2_scales=w2_scales,
-                w2_bias=w2_bias,
-                n_experts_per_token=topk,
-                activation=activation,
-                num_experts=e,
-                activation_situ_beta=4.0 if activation == "situ" else None,
-                activation_situ_linear_beta=(
-                    25.0 if activation == "situ" else None),
-            )
+        w13=w13.view(torch.float4_e2m1fn_x2),
+        w13_scales=w13_scales,
+        w13_bias=w13_bias,
+        w2=w2.view(torch.float4_e2m1fn_x2),
+        w2_scales=w2_scales,
+        w2_bias=w2_bias,
+        n_experts_per_token=topk,
+        activation=activation,
+        num_experts=e,
+        activation_situ_beta=4.0 if activation == "situ" else None,
+        activation_situ_linear_beta=(25.0 if activation == "situ" else None),
+    )
 
     output = torch.empty_like(ref_out)
     fused_moe_impl.apply(
@@ -625,7 +701,6 @@ def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias, activation):
         rtol = 2e-2
         atol = 2e-2
     torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
-
 
 
 @pytest.mark.parametrize("m,n,k", [(1, 256, 128), (4, 256, 128)])
@@ -687,12 +762,10 @@ def test_fused_moe_mxfp8(m, n, k, e, topk, dtype, has_bias):
                         device=DEVICE)
 
     for i in range(num_experts):
-        w13_hp = torch.randn(2 * intermediate_size,
-                             hidden_size,
-                             dtype=torch.float32) / 16
-        w2_hp = torch.randn(hidden_size,
-                            intermediate_size,
-                            dtype=torch.float32) / 16
+        w13_hp = torch.randn(
+            2 * intermediate_size, hidden_size, dtype=torch.float32) / 16
+        w2_hp = torch.randn(
+            hidden_size, intermediate_size, dtype=torch.float32) / 16
         # to_mxfp blocks the last dim, which is K in the checkpoint layout.
         sc13, lp13 = to_mxfp(w13_hp, format="mxfp8")
         sc2, lp2 = to_mxfp(w2_hp, format="mxfp8")
@@ -704,8 +777,9 @@ def test_fused_moe_mxfp8(m, n, k, e, topk, dtype, has_bias):
         ref_13[i] = (lp13.to(torch.float32) * sc13.view(
             torch.float8_e8m0fnu).to(torch.float32).repeat_interleave(
                 group_size, dim=-1)).to(dtype).to(DEVICE)
-        ref_2[i] = (lp2.to(torch.float32) * sc2.view(
-            torch.float8_e8m0fnu).to(torch.float32).repeat_interleave(
+        ref_2[i] = (
+            lp2.to(torch.float32) *
+            sc2.view(torch.float8_e8m0fnu).to(torch.float32).repeat_interleave(
                 group_size, dim=-1)).to(dtype).to(DEVICE)
 
     if has_bias:
@@ -795,8 +869,7 @@ def test_fused_moe_fp8block(m, n, k, e, topk, dtype, has_bias):
                      intermediate_size,
                      dtype=torch.float8_e4m3fn,
                      device=DEVICE)
-    w13_scales = (torch.randn(num_experts,
-                              (2 * intermediate_size) // 128,
+    w13_scales = (torch.randn(num_experts, (2 * intermediate_size) // 128,
                               hidden_size // 128,
                               device=DEVICE,
                               dtype=torch.float32).abs() + 0.01)
@@ -821,10 +894,9 @@ def test_fused_moe_fp8block(m, n, k, e, topk, dtype, has_bias):
                              hidden_size,
                              device=DEVICE,
                              dtype=torch.float32) / 16
-        w2_hp = torch.randn(hidden_size,
-                            intermediate_size,
-                            device=DEVICE,
-                            dtype=torch.float32) / 16
+        w2_hp = torch.randn(
+            hidden_size, intermediate_size, device=DEVICE,
+            dtype=torch.float32) / 16
         w13[i] = w13_hp.to(torch.float8_e4m3fn)
         w2[i] = w2_hp.to(torch.float8_e4m3fn)
         ref_13[i] = dequant_fp8_block_wei(w13[i], w13_scales[i]).to(dtype)
@@ -994,24 +1066,23 @@ def test_fused_moe_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, w_dtype,
     expert_start_id = e * ep_rank
     expert_end_id = expert_start_id + e
 
-
     fused_moe_impl = XpuFusedMoe(
-                w13=w13[expert_start_id:expert_end_id],
-                w13_scales=w13_scales[expert_start_id:expert_end_id]
-                if w13_scales is not None else None,
-                w13_bias=w13_bias[expert_start_id:expert_end_id]
-                if w13_bias is not None else None,
-                w2=w2[expert_start_id:expert_end_id],
-                w2_scales=w2_scales[expert_start_id:expert_end_id]
-                if w2_scales is not None else None,
-                w2_bias=w2_bias[expert_start_id:expert_end_id]
-                if w2_bias is not None else None,
-                n_experts_per_token=topk,
-                activation="silu",
-                num_experts=e,
-                ep_rank=ep_rank,
-                ep_size=ep_size,
-            )
+        w13=w13[expert_start_id:expert_end_id],
+        w13_scales=w13_scales[expert_start_id:expert_end_id]
+        if w13_scales is not None else None,
+        w13_bias=w13_bias[expert_start_id:expert_end_id]
+        if w13_bias is not None else None,
+        w2=w2[expert_start_id:expert_end_id],
+        w2_scales=w2_scales[expert_start_id:expert_end_id]
+        if w2_scales is not None else None,
+        w2_bias=w2_bias[expert_start_id:expert_end_id]
+        if w2_bias is not None else None,
+        n_experts_per_token=topk,
+        activation="silu",
+        num_experts=e,
+        ep_rank=ep_rank,
+        ep_size=ep_size,
+    )
 
     output = torch.empty_like(ref_out)
     fused_moe_impl.apply(
@@ -1124,22 +1195,22 @@ def test_fused_moe_int4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
     expert_end_id = expert_start_id + e
 
     fused_moe_impl = XpuFusedMoe(
-                w13=w13[expert_start_id:expert_end_id],
-                w13_scales=w13_scales[expert_start_id:expert_end_id]
-                if w13_scales is not None else None,
-                w13_bias=w13_bias[expert_start_id:expert_end_id]
-                if w13_bias is not None else None,
-                w2=w2[expert_start_id:expert_end_id],
-                w2_scales=w2_scales[expert_start_id:expert_end_id]
-                if w2_scales is not None else None,
-                w2_bias=w2_bias[expert_start_id:expert_end_id]
-                if w2_bias is not None else None,
-                n_experts_per_token=topk,
-                activation="silu",
-                num_experts=e,
-                ep_rank=ep_rank,
-                ep_size=ep_size,
-            )
+        w13=w13[expert_start_id:expert_end_id],
+        w13_scales=w13_scales[expert_start_id:expert_end_id]
+        if w13_scales is not None else None,
+        w13_bias=w13_bias[expert_start_id:expert_end_id]
+        if w13_bias is not None else None,
+        w2=w2[expert_start_id:expert_end_id],
+        w2_scales=w2_scales[expert_start_id:expert_end_id]
+        if w2_scales is not None else None,
+        w2_bias=w2_bias[expert_start_id:expert_end_id]
+        if w2_bias is not None else None,
+        n_experts_per_token=topk,
+        activation="silu",
+        num_experts=e,
+        ep_rank=ep_rank,
+        ep_size=ep_size,
+    )
 
     output = torch.empty_like(ref_out)
     fused_moe_impl.apply(
@@ -1248,22 +1319,22 @@ def test_fused_moe_mxfp4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
     expert_end_id = expert_start_id + e
 
     fused_moe_impl = XpuFusedMoe(
-                w13=w13[expert_start_id:expert_end_id].view(torch.float4_e2m1fn_x2),
-                w13_scales=w13_scales[expert_start_id:expert_end_id]
-                if w13_scales is not None else None,
-                w13_bias=w13_bias[expert_start_id:expert_end_id]
-                if w13_bias is not None else None,
-                w2=w2[expert_start_id:expert_end_id].view(torch.float4_e2m1fn_x2),
-                w2_scales=w2_scales[expert_start_id:expert_end_id]
-                if w2_scales is not None else None,
-                w2_bias=w2_bias[expert_start_id:expert_end_id]
-                if w2_bias is not None else None,
-                n_experts_per_token=topk,
-                activation="silu",
-                num_experts=e,
-                ep_rank=ep_rank,
-                ep_size=ep_size,
-            )
+        w13=w13[expert_start_id:expert_end_id].view(torch.float4_e2m1fn_x2),
+        w13_scales=w13_scales[expert_start_id:expert_end_id]
+        if w13_scales is not None else None,
+        w13_bias=w13_bias[expert_start_id:expert_end_id]
+        if w13_bias is not None else None,
+        w2=w2[expert_start_id:expert_end_id].view(torch.float4_e2m1fn_x2),
+        w2_scales=w2_scales[expert_start_id:expert_end_id]
+        if w2_scales is not None else None,
+        w2_bias=w2_bias[expert_start_id:expert_end_id]
+        if w2_bias is not None else None,
+        n_experts_per_token=topk,
+        activation="silu",
+        num_experts=e,
+        ep_rank=ep_rank,
+        ep_size=ep_size,
+    )
 
     output = torch.empty_like(ref_out)
     fused_moe_impl.apply(
@@ -1282,7 +1353,7 @@ def test_fused_moe_mxfp4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
     torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS) 
+@pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", [16])
 @pytest.mark.parametrize("topk", [1])
 @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=format_tc)
@@ -1319,24 +1390,30 @@ def test_fused_moe_clamp_limit(m, n, k, e, topk, dtype, gemm1_clamp_limit):
     flat_expert_indices = expert_indices.view(-1)
     flat_expert_weights = expert_scores.view(-1, 1)
 
-    ref_out = ref_fused_moe(ref_a, w13.clone(), None, w2.clone(), None,
-                            flat_expert_weights, flat_expert_indices, topk,
-                            "silu", e,
+    ref_out = ref_fused_moe(ref_a,
+                            w13.clone(),
+                            None,
+                            w2.clone(),
+                            None,
+                            flat_expert_weights,
+                            flat_expert_indices,
+                            topk,
+                            "silu",
+                            e,
                             gemm1_clamp_limit=gemm1_clamp_limit)
 
-
     fused_moe_impl = XpuFusedMoe(
-                w13=w13,
-                w13_scales=None,
-                w13_bias=None,
-                w2=w2,
-                w2_scales=None,
-                w2_bias=None,
-                n_experts_per_token=topk,
-                activation="silu",
-                num_experts=e,
-                gemm1_clamp_limit=gemm1_clamp_limit,
-            )
+        w13=w13,
+        w13_scales=None,
+        w13_bias=None,
+        w2=w2,
+        w2_scales=None,
+        w2_bias=None,
+        n_experts_per_token=topk,
+        activation="silu",
+        num_experts=e,
+        gemm1_clamp_limit=gemm1_clamp_limit,
+    )
 
     output = torch.empty_like(ref_out)
     fused_moe_impl.apply(
@@ -1354,11 +1431,16 @@ def test_fused_moe_clamp_limit(m, n, k, e, topk, dtype, gemm1_clamp_limit):
     torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
 
     # Verify clamp actually took effect: without clamp the result should differ.
-    ref_out_no_clamp = ref_fused_moe(ref_a, w13.transpose(-1, -2).clone(),
+    ref_out_no_clamp = ref_fused_moe(ref_a,
+                                     w13.transpose(-1, -2).clone(),
                                      None,
-                                     w2.transpose(-1, -2).clone(), None,
+                                     w2.transpose(-1, -2).clone(),
+                                     None,
                                      flat_expert_weights,
-                                     flat_expert_indices, topk, "silu", e,
+                                     flat_expert_indices,
+                                     topk,
+                                     "silu",
+                                     e,
                                      gemm1_clamp_limit=None)
     assert not torch.allclose(output, ref_out_no_clamp, rtol=rtol,
                               atol=atol), \

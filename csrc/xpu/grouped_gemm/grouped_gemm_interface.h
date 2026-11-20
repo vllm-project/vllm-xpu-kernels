@@ -11,3 +11,11 @@ torch::Tensor cutlass_grouped_gemm_interface(
     int64_t N,
     int64_t K,
     int64_t num_experts);
+
+void cutlass_batched_gemm_interface(
+    torch::Tensor input,
+    torch::Tensor weight,
+    const c10::optional<at::Tensor>& bias,
+    torch::Tensor output,
+    torch::Tensor rows_per_expert,
+    int64_t tile_m);
