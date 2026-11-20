@@ -472,9 +472,10 @@ void qnorm_rope_kv_insert_fp8_kernel_reduce_grid(
 
 // bf16 paged-cache variant: computation mirrors the backup base kernel; the
 // memory access and WG mapping reuse the optimized fp8 layout (flat
-// sub-group→(token,slot) mapping, 32-bit index math, 4B-per-lane accesses,
-// load/compute overlap, RoPE rotation deferred past the cos/sin loads).
-template <int HEAD_DIM, int ROPE_DIM>
+// sub-group→(token,slot) mapping, 32-bit index math, coalesced per-lane
+// accesses, load/compute overlap, RoPE rotation deferred past the cos/sin
+// loads).
+template <int HEAD_DIM, int ROPE_DIM, int SG_SIZE>
 void qnorm_rope_kv_insert_bf16_kernel(
     sycl::queue& queue,
     bf16_t* __restrict__ q_,
@@ -494,16 +495,16 @@ void qnorm_rope_kv_insert_bf16_kernel(
     int64_t cache_stride_pos_) {
   static constexpr int NOPE_DIM = HEAD_DIM - ROPE_DIM;
   static constexpr int HALF_ROPE = ROPE_DIM / 2;
-  static constexpr int SG_SIZE = 32;
-  static constexpr int WG_SIZE = 32;
-  static constexpr int SUBGROUPS_PER_WG = WG_SIZE / SG_SIZE;
-  static constexpr int NOPE_ITERS = NOPE_DIM / (2 * SG_SIZE);
-  static constexpr int ROPE_ITERS = HALF_ROPE / SG_SIZE;
-  static_assert(
-      NOPE_DIM % (2 * SG_SIZE) == 0, "NOPE_DIM must be divisible by 2*SG_SIZE");
-  static_assert(
-      HALF_ROPE % SG_SIZE == 0, "ROPE_DIM/2 must be divisible by SG_SIZE");
-  static_assert(WG_SIZE % SG_SIZE == 0);
+  static constexpr int WG_SIZE = SG_SIZE;
+  static constexpr int SUBGROUPS_PER_WG = 1;
+  // Each lane moves 8 bytes per access with SG16 and 4 bytes with SG32, so
+  // a sub-group always covers 64 bf16 values per iteration.
+  static constexpr int VEC = 32 / SG_SIZE;
+  static constexpr int NOPE_ITERS = NOPE_DIM / (2 * VEC * SG_SIZE);
+  static constexpr int ROPE_ITERS = HALF_ROPE / (VEC * SG_SIZE);
+  using vec_t = sycl::vec<uint32_t, VEC>;
+  static_assert(NOPE_DIM % (2 * VEC * SG_SIZE) == 0);
+  static_assert(HALF_ROPE % (VEC * SG_SIZE) == 0);
   const size_t total_subgroups =
       static_cast<size_t>(num_tokens_) * (num_heads_q_ + 1);
   const size_t num_workgroups =
@@ -535,8 +536,6 @@ void qnorm_rope_kv_insert_bf16_kernel(
         const int64_t pos = position_ids_[token_idx];
         const int64_t slot_id = is_kv ? slot_mapping_[token_idx] : int64_t{0};
 
-        // Consecutive lanes touch consecutive uint32 words → 4-byte
-        // stride between lanes, the coalesced XPU access pattern.
         const bf16_t* src;
         bf16_t* kv_dst = nullptr;
         if (is_kv) {
@@ -553,11 +552,11 @@ void qnorm_rope_kv_insert_bf16_kernel(
           src = q_ + token_idx * q_stride_token_ + slot_idx * q_stride_head_;
         }
 
-        uint32_t nope_regs[NOPE_ITERS];
-        const uint32_t* s4 = reinterpret_cast<const uint32_t*>(src);
-        uint32_t rope_regs[ROPE_ITERS];
-        const uint32_t* rope_s4 =
-            reinterpret_cast<const uint32_t*>(src + NOPE_DIM);
+        // Consecutive lanes touch consecutive VEC-word chunks (coalesced).
+        vec_t nope_regs[NOPE_ITERS];
+        vec_t rope_regs[ROPE_ITERS];
+        const vec_t* s4 = reinterpret_cast<const vec_t*>(src);
+        const vec_t* rope_s4 = reinterpret_cast<const vec_t*>(src + NOPE_DIM);
         // Fuse the sum_sq FMAs into the load loops so the math of
         // iteration i overlaps the in-flight loads of later iterations.
         float sum_sq = 0.0f;
@@ -565,65 +564,86 @@ void qnorm_rope_kv_insert_bf16_kernel(
         for (int i = 0; i < NOPE_ITERS; ++i) {
           nope_regs[i] = s4[lane + i * SG_SIZE];
           if (!is_kv) {
-            const float v0 = bf16x2_lo(nope_regs[i]);
-            const float v1 = bf16x2_hi(nope_regs[i]);
-            sum_sq += v0 * v0 + v1 * v1;
+#pragma unroll
+            for (int w = 0; w < VEC; ++w) {
+              const float v0 = bf16x2_lo(nope_regs[i][w]);
+              const float v1 = bf16x2_hi(nope_regs[i][w]);
+              sum_sq += v0 * v0 + v1 * v1;
+            }
           }
         }
 #pragma unroll
         for (int pp = 0; pp < ROPE_ITERS; ++pp) {
           rope_regs[pp] = rope_s4[lane + pp * SG_SIZE];
           if (!is_kv) {
-            const float x_even = bf16x2_lo(rope_regs[pp]);
-            const float x_odd = bf16x2_hi(rope_regs[pp]);
-            sum_sq += x_even * x_even + x_odd * x_odd;
+#pragma unroll
+            for (int w = 0; w < VEC; ++w) {
+              const float x_even = bf16x2_lo(rope_regs[pp][w]);
+              const float x_odd = bf16x2_hi(rope_regs[pp][w]);
+              sum_sq += x_even * x_even + x_odd * x_odd;
+            }
           }
         }
         const float* cos_ptr = cos_sin_cache_ + pos * cache_stride_pos_;
         const float* sin_ptr = cos_ptr + HALF_ROPE;
-        float cos_regs[ROPE_ITERS];
-        float sin_regs[ROPE_ITERS];
+        float cos_regs[ROPE_ITERS][VEC];
+        float sin_regs[ROPE_ITERS][VEC];
 #pragma unroll
         for (int pp = 0; pp < ROPE_ITERS; ++pp) {
-          const int p = lane + pp * SG_SIZE;
-          cos_regs[pp] = cos_ptr[p];
-          sin_regs[pp] = sin_ptr[p];
+#pragma unroll
+          for (int w = 0; w < VEC; ++w) {
+            const int p = (lane + pp * SG_SIZE) * VEC + w;
+            cos_regs[pp][w] = cos_ptr[p];
+            sin_regs[pp][w] = sin_ptr[p];
+          }
         }
 
         // NoPE stores don't need cos/sin: they retire while those loads
         // are still in flight.
         float rrms = 1.0f;
-        uint32_t* rope_dst;
+        vec_t* rope_dst;
         if (!is_kv) {
           sum_sq = sycl::reduce_over_group(sg, sum_sq, sycl::plus<float>());
           rrms = sycl::rsqrt(sum_sq / static_cast<float>(HEAD_DIM) + eps_);
 
-          uint32_t* dst = reinterpret_cast<uint32_t*>(
-              q_ + token_idx * q_stride_token_ + slot_idx * q_stride_head_);
+          bf16_t* qdst =
+              q_ + token_idx * q_stride_token_ + slot_idx * q_stride_head_;
+          vec_t* dst = reinterpret_cast<vec_t*>(qdst);
 #pragma unroll
           for (int i = 0; i < NOPE_ITERS; ++i) {
-            dst[lane + i * SG_SIZE] = pack_bf16x2(
-                bf16x2_lo(nope_regs[i]) * rrms, bf16x2_hi(nope_regs[i]) * rrms);
+            vec_t out;
+#pragma unroll
+            for (int w = 0; w < VEC; ++w) {
+              out[w] = pack_bf16x2(
+                  bf16x2_lo(nope_regs[i][w]) * rrms,
+                  bf16x2_hi(nope_regs[i][w]) * rrms);
+            }
+            dst[lane + i * SG_SIZE] = out;
           }
-          rope_dst = dst + NOPE_DIM / 2;
+          rope_dst = reinterpret_cast<vec_t*>(qdst + NOPE_DIM);
         } else {
           // KV path: raw bf16 NoPE copy into the paged cache.
-          uint32_t* dst = reinterpret_cast<uint32_t*>(kv_dst);
+          vec_t* dst = reinterpret_cast<vec_t*>(kv_dst);
 #pragma unroll
           for (int i = 0; i < NOPE_ITERS; ++i) {
             dst[lane + i * SG_SIZE] = nope_regs[i];
           }
-          rope_dst = dst + NOPE_DIM / 2;
+          rope_dst = reinterpret_cast<vec_t*>(kv_dst + NOPE_DIM);
         }
 
     // RoPE rotation last: the only consumer of the cos/sin loads.
 #pragma unroll
         for (int pp = 0; pp < ROPE_ITERS; ++pp) {
-          const float x_even = bf16x2_lo(rope_regs[pp]) * rrms;
-          const float x_odd = bf16x2_hi(rope_regs[pp]) * rrms;
-          const float new_even = x_even * cos_regs[pp] - x_odd * sin_regs[pp];
-          const float new_odd = x_even * sin_regs[pp] + x_odd * cos_regs[pp];
-          rope_dst[lane + pp * SG_SIZE] = pack_bf16x2(new_even, new_odd);
+          vec_t out;
+#pragma unroll
+          for (int w = 0; w < VEC; ++w) {
+            const float x_even = bf16x2_lo(rope_regs[pp][w]) * rrms;
+            const float x_odd = bf16x2_hi(rope_regs[pp][w]) * rrms;
+            out[w] = pack_bf16x2(
+                x_even * cos_regs[pp][w] - x_odd * sin_regs[pp][w],
+                x_even * sin_regs[pp][w] + x_odd * cos_regs[pp][w]);
+          }
+          rope_dst[lane + pp * SG_SIZE] = out;
         }
       });
 }
@@ -684,23 +704,33 @@ void deepseek_qnorm_rope_kv_insert(
 
   if (kv_cache_dtype == "bf16") {
     auto* cache_bf16 = reinterpret_cast<bf16_t*>(cache.data_ptr());
-    vllm::qnorm_rope_kv_insert_bf16_kernel<512, 64>(
-        q_xpu,
-        q_ptr,
-        kv_ptr,
-        cache_bf16,
-        slot_ptr,
-        pos_ptr,
-        cs_ptr,
-        static_cast<float>(eps),
-        num_tokens,
-        num_heads_q,
-        block_size,
-        q_stride_token,
-        q_stride_head,
-        kv_stride_token,
-        cache_block_stride,
-        cache_stride_pos);
+    // One sub-group per (token, head) at the native SIMD width: SG32 on
+    // Xe3p, SG16 elsewhere (each is up to ~1.4x faster than the other one).
+    auto run = [&](auto sg_size) {
+      vllm::qnorm_rope_kv_insert_bf16_kernel<512, 64, decltype(sg_size)::value>(
+
+          q_xpu,
+          q_ptr,
+          kv_ptr,
+          cache_bf16,
+          slot_ptr,
+          pos_ptr,
+          cs_ptr,
+          static_cast<float>(eps),
+          num_tokens,
+          num_heads_q,
+          block_size,
+          q_stride_token,
+          q_stride_head,
+          kv_stride_token,
+          cache_block_stride,
+          cache_stride_pos);
+    };
+    if (vllm::xpu::is_xe3p_arch(q.device().index())) {
+      run(std::integral_constant<int, 32>{});
+    } else {
+      run(std::integral_constant<int, 16>{});
+    }
     return;
   }
 
