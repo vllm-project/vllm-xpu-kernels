@@ -107,6 +107,17 @@ def test_compact_sampling_mask(batch_size, vocab_size, max_num_kept,
     _check_against_reference(logits, num_sampled_tokens, max_num_kept)
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_compact_sampling_mask_reduced_precision_logits(dtype):
+    logits = torch.tensor(
+        [[0.5, float("-inf"), float("inf"), float("nan"), -1.0]],
+        dtype=dtype,
+        device=DEVICE)
+    num_sampled_tokens = torch.ones(1, dtype=torch.int32, device=DEVICE)
+
+    _check_against_reference(logits, num_sampled_tokens, max_num_kept=2)
+
+
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("vocab_size", [1, 7, 33, 50, 513, 1001])
 @pytest.mark.parametrize("max_num_kept", [1, 8, 32])
