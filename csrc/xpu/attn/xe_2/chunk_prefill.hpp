@@ -15,12 +15,30 @@
 
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 
+#ifndef VLLM_GRF_SIZE
+  #define VLLM_GRF_SIZE 256
+#endif
+
 #include "collective/chunk_prefill_scheduler.hpp"
 #include "collective/chunk_prefill_epilogue.hpp"
 #include "kernel/chunk_prefill_kernel.hpp"
 
-#include "fmha_utils.hpp"
+#include "csrc/xpu/attn/fmha_utils.hpp"
 
+// Everything below belongs to this architecture alone.
+//
+// XE2 and XE3 are built into separate shared libraries but instantiate kernel
+// templates with the same names from divergent sources (for example
+// chunk_prefill_args_t differs between the two). At global namespace those
+// instantiations mangle identically and are emitted as weak, default-visibility
+// symbols, so the dynamic loader binds every reference to whichever library it
+// resolves first -- an XE3 caller then runs XE2 code and reads the argument
+// struct with the wrong layout, silently corrupting the KV cache strides.
+//
+// Keeping each architecture in its own namespace makes the mangled names
+// disjoint, so the two libraries can never cross-bind. Do not move any of these
+// declarations back to global namespace.
+namespace vllm::xpu::xe2 {
 using namespace cute;
 
 struct chunk_prefill_args_t {
@@ -74,6 +92,8 @@ struct chunk_prefill_args_t {
   // per-batch mask: true = prefill, false = decode; nullptr = process all
   void* is_prefill = nullptr;
   int page_stride_elements = 0;
+  // Per-sequence mask: nonzero = causal, zero = bidirectional.
+  const int* dynamic_causal = nullptr;
 };
 
 template <class FMHAKernel, bool isVarLen>
@@ -174,7 +194,8 @@ struct KernelLauncher {
          reinterpret_cast<ElementQ*>(args.sm_sink),
          args.softmax_lse,
          args.lse_stride,
-         static_cast<const bool*>(args.is_prefill)},
+         static_cast<const bool*>(args.is_prefill),
+         args.dynamic_causal},
         {args.sm_scale,
          args.k_scale,
          args.v_scale,
@@ -224,7 +245,8 @@ struct KernelLauncher {
         syclex::work_group_scratch_size(smem_size),
     };
     compat::experimental::kernel_properties kernel_props{
-        syclex::sub_group_size<cute::intel::sg_size>, intelex::grf_size<256>};
+        syclex::sub_group_size<cute::intel::sg_size>,
+        intelex::grf_size<VLLM_GRF_SIZE>};
     compat::experimental::launch_policy policy{
         sycl_grid, sycl_block, launch_props, kernel_props};
     compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(
@@ -289,7 +311,8 @@ struct FMHAConfig {
     static_assert(
         get<0>(TileShapeOutput{}) == get<0>(TileShapePV{}),
         "Output tile and P*V tile have different sizes in Q dimension");
-    constexpr int VTiles = get<1>(TileShapeOutput{}) / get<1>(TileShapePV{});
+    constexpr int VTiles =
+        ceil_div(get<1>(TileShapeOutput{}), get<1>(TileShapePV{}));
 
     auto make_dummy_tensor = [&](auto val, auto stride) {
       return make_tensor(
@@ -346,6 +369,11 @@ struct FMHAConfig {
   }
 };
 
+// Hidden visibility prevents these per-arch template instantiations from being
+// exported and interposed across the XE2/XE3 kernel shared libraries (which
+// both define symbols with identical mangled names). Without this, the XE3
+// wrapper would bind to the XE2 instantiation at load time (XE2 is linked
+// first) and launch a kernel built for the wrong architecture.
 template <
     typename chunk_policy,
     bool Paged,
@@ -353,7 +381,7 @@ template <
     bool Local,
     bool Sink,
     bool SoftmaxLSE>
-void policy_dispatch_impl(
+__attribute__((visibility("hidden"))) void policy_dispatch_impl(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
     const chunk_prefill_args_t& args) {
@@ -466,3 +494,5 @@ void policy_dispatch_impl(
     }
   }
 }
+
+}  // namespace vllm::xpu::xe2

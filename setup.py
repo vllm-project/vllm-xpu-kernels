@@ -34,14 +34,6 @@ envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'tools',
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
 
-def is_sccache_available() -> bool:
-    return which("sccache") is not None
-
-
-def is_ccache_available() -> bool:
-    return which("ccache") is not None
-
-
 def is_ninja_available() -> bool:
     return which("ninja") is not None
 
@@ -75,9 +67,9 @@ def _build_custom_ops() -> bool:
     return True
 
 
-def _is_enabled(env_name: str) -> bool:
+def _is_enabled(env_name: str, default: str = "ON") -> bool:
     """Check if a build option env var is enabled (default ON)."""
-    val = os.environ.get(env_name, "ON").strip().upper()
+    val = os.environ.get(env_name, default).strip().upper()
     return val not in ("0", "OFF", "FALSE", "NO")
 
 
@@ -163,16 +155,11 @@ class cmake_build_ext(build_ext):
         if verbose:
             cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
 
-        if is_sccache_available():
-            cmake_args += [
-                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
-                '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
-            ]
-        elif is_ccache_available():
-            cmake_args += [
-                '-DCMAKE_C_COMPILER_LAUNCHER=ccache',
-                '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
-            ]
+        compiler_cache = envs.get_compiler_cache()
+        cmake_args += [
+            f'-DCMAKE_C_COMPILER_LAUNCHER={compiler_cache}',
+            f'-DCMAKE_CXX_COMPILER_LAUNCHER={compiler_cache}',
+        ]
 
         # Pass the python executable to cmake so it can find an exact
         # match.
@@ -187,7 +174,6 @@ class cmake_build_ext(build_ext):
         _kernel_options = [
             "BUILD_SYCL_TLA_KERNELS",
             "VLLM_XPU_ENABLE_XE2",
-            "VLLM_XPU_ENABLE_XE_DEFAULT",
             "BASIC_KERNELS_ENABLED",
             "FA2_KERNELS_ENABLED",
             "MOE_KERNELS_ENABLED",
@@ -195,10 +181,18 @@ class cmake_build_ext(build_ext):
             "MQA_LOGITS_KERNELS_ENABLED",
             "XPU_SPECIFIC_KERNELS_ENABLED",
             "XPUMEM_ALLOCATOR_ENABLED",
+            "VLLM_XPU_ENABLE_ONEDNN",
+            "BUILD_QUANT_ASM_XE3",
         ]
         for opt in _kernel_options:
             cmake_args.append('-D{}={}'.format(
                 opt, "ON" if _is_enabled(opt) else "OFF"))
+
+        # XE3 (CRI/Xe3p) kernels are enabled by default, like XE2. Forward the
+        # toggle so users can still disable them explicitly.
+        cmake_args.append('-DVLLM_XPU_ENABLE_XE3P={}'.format(
+            "ON" if _is_enabled("VLLM_XPU_ENABLE_XE3P", default="ON")
+            else "OFF"))
 
         # Forward paged decode kernel config if set via environment variable.
         # Example: VLLM_PAGED_DECODE_CONFIG=llama pip install .
@@ -548,6 +542,12 @@ ext_modules = []
 # Only include libraries whose cmake targets will actually be built, based on
 # the architecture and TLA kernel options.
 additional_libraries = {}
+# The Xe3 asm quant library is built independently of the SYCL-TLA kernels;
+# keep this condition in sync with the quant_asm_xe_3 target in CMakeLists.txt.
+if (_is_enabled("VLLM_XPU_ENABLE_XE3P", default="ON")
+        and _is_enabled("BASIC_KERNELS_ENABLED")
+        and _is_enabled("BUILD_QUANT_ASM_XE3")):
+    additional_libraries["quant_asm_xe_3"] = ""
 if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
     if _is_enabled("VLLM_XPU_ENABLE_XE2"):
         if _is_enabled("FA2_KERNELS_ENABLED"):
@@ -564,10 +564,12 @@ if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
         if _is_enabled("MOE_KERNELS_ENABLED"):
             additional_libraries["grouped_gemm_xe_2"] = (
                 "/csrc/xpu/grouped_gemm/xe_2")
-    if _is_enabled("VLLM_XPU_ENABLE_XE_DEFAULT") and _is_enabled(
-            "MOE_KERNELS_ENABLED"):
-        additional_libraries["grouped_gemm_xe_default"] = (
-            "/csrc/xpu/grouped_gemm/xe_default")
+    if _is_enabled("VLLM_XPU_ENABLE_XE3P", default="ON"):
+        if _is_enabled("FA2_KERNELS_ENABLED"):
+            additional_libraries["attn_kernels_xe_3"] = "/csrc/xpu/attn/xe_3"
+        if _is_enabled("MOE_KERNELS_ENABLED"):
+            additional_libraries["grouped_gemm_xe_3"] = (
+                "/csrc/xpu/grouped_gemm/xe_3")
 
 if _build_custom_ops():
     if _is_enabled("BASIC_KERNELS_ENABLED"):

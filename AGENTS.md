@@ -18,8 +18,9 @@ can dispatch on Intel GPU hardware.
 - Python package metadata currently requires Python `>=3.9,<3.14`; CMake still
   searches `3.9` through `3.12`, so verify interpreter support before changing
   build behavior.
-- PyTorch XPU support is currently `2.13.0+xpu` in `pyproject.toml`, with CMake
-  expecting torch `2.13.0` for XPU.
+- PyTorch XPU support is currently `2.15.0+xpu` in `pyproject.toml`, with CMake
+  expecting torch `2.15.0` for XPU. Install from
+  `https://download.pytorch.org/whl/xpu`.
 - oneAPI 2026.0 is the expected toolchain. Source
   `/opt/intel/oneapi/setvars.sh` before building native extensions.
 
@@ -72,12 +73,23 @@ Important build environment variables:
   extraction.
 - `VERBOSE=1`: enable verbose CMake makefile output.
 - `BUILD_SYCL_TLA_KERNELS`: enable or disable SYCL-TLA based kernels.
-- `VLLM_XPU_ENABLE_XE2` and `VLLM_XPU_ENABLE_XE_DEFAULT`: architecture-family
+- `VLLM_XPU_ENABLE_XE2` and `VLLM_XPU_ENABLE_XE3P`: architecture-family
   toggles.
+- `BUILD_QUANT_ASM_XE3`: build `libquant_asm_xe_3`, which recompiles the fp8,
+  MXFP4/MXFP8, fused quant, and `reshape_and_cache_flash` sources with the Xe3p
+  inline-asm conversion paths. It is AOT compiled for
+  `VLLM_XPU_XE3P_AOT_DEVICES` only and needs `VLLM_XPU_ENABLE_XE3P` and
+  `BASIC_KERNELS_ENABLED`. `_C` routes these ops to it at runtime on Xe3p
+  devices; set `VLLM_XPU_DISABLE_QUANT_ASM=1` to force the portable `_C` path.
 - `BASIC_KERNELS_ENABLED`, `FA2_KERNELS_ENABLED`, `MOE_KERNELS_ENABLED`,
   `GDN_KERNELS_ENABLED`, `MQA_LOGITS_KERNELS_ENABLED`,
   `XPU_SPECIFIC_KERNELS_ENABLED`, `XPUMEM_ALLOCATOR_ENABLED`: extension or
   kernel-family toggles forwarded from `setup.py` to CMake.
+- `VLLM_XPU_ENABLE_ONEDNN`: enable or disable the oneDNN-backed GEMM kernels in
+  the `_xpu_C` extension (fp8/int4/fp4 GEMM ops and `get_onednn_version`). When
+  disabled, oneDNN is not fetched or linked and the ops are still registered but
+  raise a runtime error instructing the user to rebuild with
+  `VLLM_XPU_ENABLE_ONEDNN=ON`.
 - `VLLM_CHUNK_PREFILL_CONFIG`: selects the chunk prefill attention kernel
   config used for prompt processing. Accepts a preset name with or without the
   `.conf` suffix from `csrc/xpu/attn/kernel_configs/`, or an absolute path to a
@@ -125,8 +137,7 @@ Op registration generally follows this pattern:
 - GPU tests may require Intel hardware and Level Zero access; if unavailable,
   state that clearly instead of treating failures as code failures.
 - Useful test environment variables include `ZE_AFFINITY_MASK`,
-  `SKIP_HANG_KERNEL=1`, `SKIP_ACC_ERROR_KERNEL=1`,
-  `VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1`, and
+  `SKIP_HANG_KERNEL=1`, `SKIP_ACC_ERROR_KERNEL=1`, and
   `XPU_KERNEL_PYTEST_PROFILER=MINI`.
 - `tests/register_ops.py` is useful for checking op registration and dispatch
   expectations.

@@ -14,10 +14,15 @@ inline bool is_supported_fp4(at::ScalarType t) {
   return t == at::ScalarType::Float4_e2m1fn_x2;
 }
 
+// If `out` is given, it is validated against A/B (device, dtype, and shape)
+// and returned as-is so the result can be written in place into it;
+// otherwise a new output tensor is allocated using `out_dtype` (defaulting
+// to fp16).
 torch::Tensor check_and_create_output_tensor(
     const torch::Tensor& A,
     const torch::Tensor& B,
-    std::optional<c10::ScalarType> out_dtype) {
+    std::optional<c10::ScalarType> out_dtype,
+    const std::optional<torch::Tensor>& out = std::nullopt) {
   TORCH_CHECK(
       A.dim() == 2 || A.dim() == 3,
       "OneDNN Matmul only support 2D and 3D inputs!\n");
@@ -52,6 +57,33 @@ torch::Tensor check_and_create_output_tensor(
     // src{b, m, k}, wei{k, n}, bias{n}, dst{b, m, n}
   }
 
+  if (out.has_value()) {
+    const auto& out_ = out.value();
+    const c10::IntArrayRef expected_shape(result_shape);
+    TORCH_CHECK(
+        out_.device() == A.device(),
+        "OneDNN Matmul expects out on device ",
+        A.device(),
+        ", got ",
+        out_.device(),
+        ".");
+    TORCH_CHECK(
+        out_.sizes() == expected_shape,
+        "OneDNN Matmul expects out of shape ",
+        expected_shape,
+        ", got ",
+        out_.sizes(),
+        ".");
+    TORCH_CHECK(
+        !out_dtype.has_value() || out_.scalar_type() == out_dtype.value(),
+        "OneDNN Matmul expects out of dtype ",
+        out_dtype.value_or(out_.scalar_type()),
+        ", got ",
+        out_.scalar_type(),
+        ".");
+    return out_;
+  }
+
   // deal with input shape [m, b, k] stride [k, m * k, 1]
   auto k = A.size(A.dim() - 1);
   auto n = result_shape.back();
@@ -66,13 +98,14 @@ torch::Tensor check_and_create_output_tensor(
   return at::empty_strided(result_shape, res_stride, options);
 }
 
-torch::Tensor fp8_gemm(
+static torch::Tensor fp8_gemm_common(
     const torch::Tensor& A,  // [b, m ,k]
     const torch::Tensor& B,  // [k, n]
     std::optional<c10::ScalarType> out_dtype,
     const std::optional<torch::Tensor>& A_scale_,
     const std::optional<torch::Tensor>& B_scale_,
-    const std::optional<torch::Tensor>& bias_) {
+    const std::optional<torch::Tensor>& bias_,
+    std::optional<torch::Tensor> out) {
   const at::DeviceGuard device_guard(A.device());
   // The weight B may be provided in a transposed (NT) layout, and A supports
   // strided layouts, so both are excluded from the contiguity check.
@@ -85,7 +118,9 @@ torch::Tensor fp8_gemm(
   TORCH_CHECK(
       !bias_.has_value() || bias_.value().is_contiguous(),
       "bias must be contiguous for fp8 matmul");
-  torch::Tensor result = check_and_create_output_tensor(A, B, out_dtype);
+  // When `out` is given, it is validated and written in place; otherwise a
+  // new output tensor is allocated.
+  torch::Tensor result = check_and_create_output_tensor(A, B, out_dtype, out);
   auto a_st = A.scalar_type();
   auto b_st = B.scalar_type();
   TORCH_CHECK(
@@ -102,6 +137,29 @@ torch::Tensor fp8_gemm(
   torch::Tensor B_scale = B_scale_.value_or(at::ones({1}, torch::kFloat));
   oneDNN::dnnl_matmul_w8a8_fp8(result, A, B, is_nt, bias_, A_scale, B_scale);
   return result;
+}
+
+torch::Tensor fp8_gemm(
+    const torch::Tensor& A,
+    const torch::Tensor& B,
+    std::optional<c10::ScalarType> out_dtype,
+    const std::optional<torch::Tensor>& A_scale_,
+    const std::optional<torch::Tensor>& B_scale_,
+    const std::optional<torch::Tensor>& bias_) {
+  return fp8_gemm_common(
+      A, B, out_dtype, A_scale_, B_scale_, bias_, std::nullopt);
+}
+
+torch::Tensor fp8_gemm_out(
+    torch::Tensor out,
+    const torch::Tensor& A,
+    const torch::Tensor& B,
+    std::optional<c10::ScalarType> out_dtype,
+    const std::optional<torch::Tensor>& A_scale_,
+    const std::optional<torch::Tensor>& B_scale_,
+    const std::optional<torch::Tensor>& bias_) {
+  return fp8_gemm_common(
+      A, B, out_dtype, A_scale_, B_scale_, bias_, std::move(out));
 }
 
 torch::Tensor fp8_bmm(

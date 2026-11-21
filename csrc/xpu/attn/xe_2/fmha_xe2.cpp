@@ -7,6 +7,7 @@
   #include "chunk_prefill_extern.hpp"
 #endif
 
+namespace vllm::xpu::xe2 {
 using namespace cute;
 
 void cutlass_chunk_prefill_xe2(
@@ -32,7 +33,8 @@ void cutlass_chunk_prefill_xe2(
     bool is_local,
     bool is_sink,
     std::optional<at::Tensor>& softmax_lse,
-    std::optional<const at::Tensor>& is_prefill) {
+    std::optional<const at::Tensor>& is_prefill,
+    std::optional<const at::Tensor>& dynamic_causal) {
   cutlass_chunk_prefill_impl(
       queue,
       query,
@@ -56,7 +58,8 @@ void cutlass_chunk_prefill_xe2(
       is_local,
       is_sink,
       softmax_lse,
-      is_prefill);
+      is_prefill,
+      dynamic_causal);
 }
 
 void cutlass_chunk_prefill_impl(
@@ -82,7 +85,8 @@ void cutlass_chunk_prefill_impl(
     bool is_local,
     bool is_sink,
     std::optional<at::Tensor>& softmax_lse,
-    std::optional<const at::Tensor>& is_prefill) {
+    std::optional<const at::Tensor>& is_prefill,
+    std::optional<const at::Tensor>& dynamic_causal) {
   // general params
   int batch_size, num_heads_q, num_heads_kv, head_size;
   // additional params
@@ -118,10 +122,19 @@ void cutlass_chunk_prefill_impl(
     window_size_left = window_size_left == -1 ? max_seqlen_k : window_size_left;
     window_size_right =
         window_size_right == -1 ? max_seqlen_k : window_size_right;
-    if (is_causal) {
+    if (dynamic_causal.has_value() && window_size_right == 0) {
+      window_size_right = window_size_left;
+    } else if (is_causal && !dynamic_causal.has_value()) {
       window_size_right = 0;
       is_causal = false;
     }
+  }
+
+  // A dynamic batch may contain causal sequences even when the global flag is
+  // false. Select the causal-capable specialization and let each sequence's
+  // tensor value control whether triangular masking is applied.
+  if (dynamic_causal.has_value()) {
+    is_causal = true;
   }
 
   bool is_fp8_kv =
@@ -168,6 +181,9 @@ void cutlass_chunk_prefill_impl(
   // Per-batch prefill/decode mask (nullptr -> process all batches)
   args.is_prefill =
       is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr;
+  args.dynamic_causal = dynamic_causal.has_value()
+                            ? dynamic_causal.value().data_ptr<int>()
+                            : nullptr;
   // Extract Q, K, V, O strides from tensors
   if (is_varlen) {
     // Q/O: [total_seq, num_heads, head_size]
@@ -243,30 +259,33 @@ void cutlass_chunk_prefill_impl(
       "FMHA forward only supports head dimension at most " +
           std::to_string(max_head_size));
 
-  // softmax_lse output is only supported on the
-  // !Paged && !Local && !Sink specialization (template-constrained to
-  // keep kernel instantiation count bounded).
+  // Paged and non-paged chunk prefill support LSE for global attention
+  // without sinks. Local/Sink specializations remain disabled to keep the
+  // kernel matrix bounded.
   bool is_lse = softmax_lse.has_value();
   TORCH_CHECK(
-      !is_lse || (!is_paged && !is_local && !is_sink),
-      "softmax_lse output is only supported when is_paged=false, "
-      "is_local=false, is_sink=false");
+      !is_lse || (!is_local && !is_sink),
+      "chunk prefill softmax_lse output is only supported when "
+      "is_local=false and is_sink=false");
 
-  // Validate block_size: 16, 32, or any positive multiple of 64. Non-paged
-  // mode does not use block_size, so only enforce the check when paged.
+  // Validate block_size: any positive multiple of 16. Non-paged mode does not
+  // use block_size, so only enforce the check when paged.
   if (is_paged) {
     TORCH_CHECK(
-        block_size == 16 || block_size == 32 ||
-            (block_size > 0 && (block_size % 64) == 0),
+        block_size > 0 && (block_size % 16) == 0,
         "chunk_prefill: unsupported block_size=",
         block_size,
-        " (supported: 16, 32, or any positive multiple of 64)");
+        " (supported: any positive multiple of 16)");
   }
 
-  // Block_size == 16 needs the *_b16 policies (TileShapeQK[1] = 16).
-  // All other supported sizes (32, 64*n) divide cleanly by the default
-  // TileShapeQK[1] = 32 used in the standard chunk_policy_head* set.
-  const bool use_b16_policy = is_paged && (block_size == 16);
+  // Policy selection preserves the original routing for the previously
+  // supported sizes: block_size == 32 and every positive multiple of 64 use
+  // the default chunk_policy_head* set (TileShapeQK[1] = 32), which divides
+  // those page sizes cleanly. Every other supported multiple of 16 (16, 48,
+  // 80, 96, 112, 160, ...) uses the *_b16 policies (TileShapeQK[1] = 16) so
+  // that tiles_per_page = page_size / TileShapeQK[1] is exact.
+  const bool use_b16_policy =
+      is_paged && (block_size != 32) && (block_size % 64 != 0);
 
   if (use_b16_policy) {
     if (args.head_size <= HEAD_SIZE_LIMIT_0) {
@@ -280,7 +299,7 @@ void cutlass_chunk_prefill_impl(
           is_sink,
           is_lse);
     } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
-      policy_dispatch_func<chunk_policy_head96_b16>(
+      policy_dispatch_func<chunk_policy_head80_b16>(
           queue,
           cuQKType,
           args,
@@ -290,7 +309,7 @@ void cutlass_chunk_prefill_impl(
           is_sink,
           is_lse);
     } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
-      policy_dispatch_func<chunk_policy_head128_b16>(
+      policy_dispatch_func<chunk_policy_head96_b16>(
           queue,
           cuQKType,
           args,
@@ -300,7 +319,7 @@ void cutlass_chunk_prefill_impl(
           is_sink,
           is_lse);
     } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
-      policy_dispatch_func<chunk_policy_head192_b16>(
+      policy_dispatch_func<chunk_policy_head128_b16>(
           queue,
           cuQKType,
           args,
@@ -310,7 +329,7 @@ void cutlass_chunk_prefill_impl(
           is_sink,
           is_lse);
     } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
-      policy_dispatch_func<chunk_policy_head256_b16>(
+      policy_dispatch_func<chunk_policy_head192_b16>(
           queue,
           cuQKType,
           args,
@@ -320,6 +339,16 @@ void cutlass_chunk_prefill_impl(
           is_sink,
           is_lse);
     } else if (args.head_size <= HEAD_SIZE_LIMIT_5) {
+      policy_dispatch_func<chunk_policy_head256_b16>(
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
+    } else if (args.head_size <= HEAD_SIZE_LIMIT_6) {
       policy_dispatch_func<chunk_policy_head512_b16>(
           queue,
           cuQKType,
@@ -336,21 +365,26 @@ void cutlass_chunk_prefill_impl(
     policy_dispatch_func<chunk_policy_head64>(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
-    policy_dispatch_func<chunk_policy_head96>(
+    policy_dispatch_func<chunk_policy_head80>(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
-    policy_dispatch_func<chunk_policy_head128>(
+    policy_dispatch_func<chunk_policy_head96>(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
-    policy_dispatch_func<chunk_policy_head192>(
+    policy_dispatch_func<chunk_policy_head128>(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
-    policy_dispatch_func<chunk_policy_head256>(
+    policy_dispatch_func<chunk_policy_head192>(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_5) {
+    policy_dispatch_func<chunk_policy_head256>(
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
+  } else if (args.head_size <= HEAD_SIZE_LIMIT_6) {
     policy_dispatch_func<chunk_policy_head512>(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else {
     TORCH_CHECK(false, "Unsupported head size for fmha");
   }
 }
+
+}  // namespace vllm::xpu::xe2

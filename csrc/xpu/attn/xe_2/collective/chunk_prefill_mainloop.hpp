@@ -41,14 +41,26 @@
 #include "cute/atom/mma_atom.hpp"
 #include "flash_attention_v2/collective/fmha_fusion.hpp"
 
+#include "block_2d_align.hpp"
+
 namespace cutlass::fmha {
+// Arch-tagged inline namespace: gives these definitions a mangled name
+// distinct from the other Xe architecture's identically named copies,
+// while leaving name lookup (cutlass::fmha::...) unchanged.
+inline namespace vllm_xpu_xe2 {
 
 template <int Stages>
 class XeDefault {};  // Default FMHA mainloop, P in registers.
 
+}  // namespace vllm_xpu_xe2
+
 };  // namespace cutlass::fmha
 
 namespace cutlass::fmha::collective {
+// Arch-tagged inline namespace: gives these definitions a mangled name
+// distinct from the other Xe architecture's identically named copies,
+// while leaving name lookup (cutlass::fmha::...) unchanged.
+inline namespace vllm_xpu_xe2 {
 
 static inline void sbarrier_wait() { asm volatile("sbarrier.wait\n"); }
 
@@ -288,14 +300,23 @@ struct FMHAFwdMainloop<
     auto tile_shape_v =
         make_shape(get<1>(TileShapePV{}) * C<VTiles>{}, get<2>(TileShapePV{}));
 
-    /* Create proxy coordinate tensors for Q/K/P/V */
-    Tensor cQ = make_identity_tensor(Q_2D.shape());               // (q,d)
-    Tensor cK = make_identity_tensor(K_2D.shape());               // (k,d)
-    Tensor cV = make_identity_tensor(V_2D.shape());               // (v,k)
-    Tensor cP = make_identity_tensor(take<0, 2>(TileShapeQK{}));  // (q,k)
+    /* 64B-align the per-head block-2D surfaces (see block_2d_align.hpp) */
+    int x_shift_q, x_shift_k, x_shift_v;
+    auto Q_2D_al = align_block_2d_base<1>(Q_2D, x_shift_q);
+    auto K_2D_al = align_block_2d_base<1>(K_2D, x_shift_k);
+    auto V_2D_al = align_block_2d_base<0>(V_2D, x_shift_v);
 
-    auto K_2D_0 = K_2D;
-    auto V_2D_0 = V_2D;
+    /* Create proxy coordinate tensors for Q/K/P/V */
+    Tensor cQ =
+        make_shifted_identity_tensor<1>(Q_2D.shape(), x_shift_q);  // (q,d)
+    Tensor cK =
+        make_shifted_identity_tensor<1>(K_2D.shape(), x_shift_k);  // (k,d)
+    Tensor cV =
+        make_shifted_identity_tensor<0>(V_2D.shape(), x_shift_v);  // (v,k)
+    Tensor cP = make_identity_tensor(take<0, 2>(TileShapeQK{}));   // (q,k)
+
+    auto K_2D_0 = K_2D_al;
+    auto V_2D_0 = V_2D_al;
 
     // --- Xe 2D-block surface-height split
     // ------------------------------------- The Xe LSC 2D block-load descriptor
@@ -332,8 +353,9 @@ struct FMHAFwdMainloop<
         rows = 1;
       }
       return make_tensor(
-          K_2D.data() + int64_t(surf) * k_surf_shift,
-          make_layout(make_shape(rows, get<1>(K_2D.shape())), K_2D.stride()));
+          K_2D_al.data() + int64_t(surf) * k_surf_shift,
+          make_layout(
+              make_shape(rows, get<1>(K_2D_al.shape())), K_2D_al.stride()));
     };
     [[maybe_unused]] auto make_v_surface = [&](int surf) {
       int64_t rem = int64_t(v_cols_total) - int64_t(surf) * rows_per_surface;
@@ -342,8 +364,9 @@ struct FMHAFwdMainloop<
         cols = 1;
       }
       return make_tensor(
-          V_2D.data() + int64_t(surf) * v_surf_shift,
-          make_layout(make_shape(get<0>(V_2D.shape()), cols), V_2D.stride()));
+          V_2D_al.data() + int64_t(surf) * v_surf_shift,
+          make_layout(
+              make_shape(get<0>(V_2D_al.shape()), cols), V_2D_al.stride()));
     };
 
     if constexpr (has_large_surface) {
@@ -376,20 +399,22 @@ struct FMHAFwdMainloop<
       }
 
       K_2D_0 = make_tensor(
-          K_2D.data(),
+          K_2D_al.data(),
           make_layout(
-              make_shape(k_rows0, get<1>(K_2D.shape())), K_2D.stride()));
+              make_shape(k_rows0, get<1>(K_2D_al.shape())), K_2D_al.stride()));
       V_2D_0 = make_tensor(
-          V_2D.data(),
+          V_2D_al.data(),
           make_layout(
-              make_shape(get<0>(V_2D.shape()), v_cols0), V_2D.stride()));
+              make_shape(get<0>(V_2D_al.shape()), v_cols0), V_2D_al.stride()));
 
-      cK = make_identity_tensor(make_shape(
-          PagedKV ? rows_per_surface : k_rows_total,
-          get<1>(K_2D.shape())));  // (k,d)
-      cV = make_identity_tensor(make_shape(
-          get<0>(V_2D.shape()),
-          PagedKV ? rows_per_surface : v_cols_total));  // (v,k)
+      cK = make_shifted_identity_tensor<1>(
+          make_shape(
+              PagedKV ? rows_per_surface : k_rows_total, get<1>(K_2D.shape())),
+          x_shift_k);  // (k,d)
+      cV = make_shifted_identity_tensor<0>(
+          make_shape(
+              get<0>(V_2D.shape()), PagedKV ? rows_per_surface : v_cols_total),
+          x_shift_v);  // (v,k)
     }
 
     /* Partition global tensors into workgroup tiles */
@@ -409,7 +434,7 @@ struct FMHAFwdMainloop<
         Step<X, _1, _1>{});  // (v,k,VV,K)
 
     /* Create global -> register copies */
-    TiledCopyQ copy_q{Q_2D};
+    TiledCopyQ copy_q{Q_2D_al};
     TiledCopyK copy_k{K_2D_0};
     TiledCopyV copy_v{V_2D_0};
 
@@ -507,8 +532,12 @@ struct FMHAFwdMainloop<
         prefetch_v =
             make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_2D_n);
 
-        Tensor cK_n = make_identity_tensor(K_2D_n.shape());  // (k,d)
-        Tensor cV_n = make_identity_tensor(V_2D_n.shape());  // (v,k)
+        Tensor cK_n = make_shifted_identity_tensor<1>(
+            make_shape(get<0>(K_2D_n.shape()), get<1>(K_2D.shape())),
+            x_shift_k);  // (k,d)
+        Tensor cV_n = make_shifted_identity_tensor<0>(
+            make_shape(get<0>(V_2D.shape()), get<1>(V_2D_n.shape())),
+            x_shift_v);  // (v,k)
 
         Tensor gK_n = local_tile(
             cK_n,
@@ -931,14 +960,23 @@ struct DecodeFwdMainloop<
     auto tile_shape_v =
         make_shape(get<1>(TileShapePV{}) * C<VTiles>{}, get<2>(TileShapePV{}));
 
-    /* Create proxy coordinate tensors for Q/K/P/V */
-    Tensor cQ = make_identity_tensor(Q_2D.shape());               // (q,d)
-    Tensor cK = make_identity_tensor(K_2D.shape());               // (k,d)
-    Tensor cV = make_identity_tensor(V_2D.shape());               // (v,k)
-    Tensor cP = make_identity_tensor(take<0, 2>(TileShapeQK{}));  // (q,k)
+    /* 64B-align the per-head block-2D surfaces (see block_2d_align.hpp) */
+    int x_shift_q, x_shift_k, x_shift_v;
+    auto Q_2D_al = align_block_2d_base<1>(Q_2D, x_shift_q);
+    auto K_2D_al = align_block_2d_base<1>(K_2D, x_shift_k);
+    auto V_2D_al = align_block_2d_base<0>(V_2D, x_shift_v);
 
-    auto K_2D_0 = K_2D;
-    auto V_2D_0 = V_2D;
+    /* Create proxy coordinate tensors for Q/K/P/V */
+    Tensor cQ =
+        make_shifted_identity_tensor<1>(Q_2D.shape(), x_shift_q);  // (q,d)
+    Tensor cK =
+        make_shifted_identity_tensor<1>(K_2D.shape(), x_shift_k);  // (k,d)
+    Tensor cV =
+        make_shifted_identity_tensor<0>(V_2D.shape(), x_shift_v);  // (v,k)
+    Tensor cP = make_identity_tensor(take<0, 2>(TileShapeQK{}));   // (q,k)
+
+    auto K_2D_0 = K_2D_al;
+    auto V_2D_0 = V_2D_al;
 
     // --- Xe 2D-block surface-height split
     // ------------------------------------- The Xe LSC 2D block-load descriptor
@@ -976,8 +1014,9 @@ struct DecodeFwdMainloop<
         rows = 1;
       }
       return make_tensor(
-          K_2D.data() + int64_t(surf) * k_surf_shift,
-          make_layout(make_shape(rows, get<1>(K_2D.shape())), K_2D.stride()));
+          K_2D_al.data() + int64_t(surf) * k_surf_shift,
+          make_layout(
+              make_shape(rows, get<1>(K_2D_al.shape())), K_2D_al.stride()));
     };
     [[maybe_unused]] auto make_v_surface = [&](int surf) {
       int64_t rem = int64_t(v_cols_total) - int64_t(surf) * rows_per_surface;
@@ -986,8 +1025,9 @@ struct DecodeFwdMainloop<
         cols = 1;
       }
       return make_tensor(
-          V_2D.data() + int64_t(surf) * v_surf_shift,
-          make_layout(make_shape(get<0>(V_2D.shape()), cols), V_2D.stride()));
+          V_2D_al.data() + int64_t(surf) * v_surf_shift,
+          make_layout(
+              make_shape(get<0>(V_2D_al.shape()), cols), V_2D_al.stride()));
     };
 
     if constexpr (has_large_surface) {
@@ -1020,20 +1060,22 @@ struct DecodeFwdMainloop<
       }
 
       K_2D_0 = make_tensor(
-          K_2D.data(),
+          K_2D_al.data(),
           make_layout(
-              make_shape(k_rows0, get<1>(K_2D.shape())), K_2D.stride()));
+              make_shape(k_rows0, get<1>(K_2D_al.shape())), K_2D_al.stride()));
       V_2D_0 = make_tensor(
-          V_2D.data(),
+          V_2D_al.data(),
           make_layout(
-              make_shape(get<0>(V_2D.shape()), v_cols0), V_2D.stride()));
+              make_shape(get<0>(V_2D_al.shape()), v_cols0), V_2D_al.stride()));
 
-      cK = make_identity_tensor(make_shape(
-          PagedKV ? rows_per_surface : k_rows_total,
-          get<1>(K_2D.shape())));  // (k,d)
-      cV = make_identity_tensor(make_shape(
-          get<0>(V_2D.shape()),
-          PagedKV ? rows_per_surface : v_cols_total));  // (v,k)
+      cK = make_shifted_identity_tensor<1>(
+          make_shape(
+              PagedKV ? rows_per_surface : k_rows_total, get<1>(K_2D.shape())),
+          x_shift_k);  // (k,d)
+      cV = make_shifted_identity_tensor<0>(
+          make_shape(
+              get<0>(V_2D.shape()), PagedKV ? rows_per_surface : v_cols_total),
+          x_shift_v);  // (v,k)
     }
 
     /* Partition global tensors into workgroup tiles */
@@ -1053,7 +1095,7 @@ struct DecodeFwdMainloop<
         Step<X, _1, _1>{});  // (v,k,VV,K)
 
     /* Create global -> register copies */
-    TiledCopyQ copy_q{Q_2D};
+    TiledCopyQ copy_q{Q_2D_al};
     TiledCopyK copy_k{K_2D_0};
     TiledCopyV copy_v{V_2D_0};
 
@@ -1139,8 +1181,12 @@ struct DecodeFwdMainloop<
         prefetch_v =
             make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_2D_n);
 
-        Tensor cK_n = make_identity_tensor(K_2D_n.shape());  // (k,d)
-        Tensor cV_n = make_identity_tensor(V_2D_n.shape());  // (v,k)
+        Tensor cK_n = make_shifted_identity_tensor<1>(
+            make_shape(get<0>(K_2D_n.shape()), get<1>(K_2D.shape())),
+            x_shift_k);  // (k,d)
+        Tensor cV_n = make_shifted_identity_tensor<0>(
+            make_shape(get<0>(V_2D.shape()), get<1>(V_2D_n.shape())),
+            x_shift_v);  // (v,k)
 
         Tensor gK_n = local_tile(
             cK_n,
@@ -1405,6 +1451,8 @@ CUTLASS_HOST_DEVICE constexpr auto get_tiled_mma_pv(
 
   return TiledMMAHelper<MMAOp, WGTilePV, SGLayoutPV>{};
 }
+
+}  // namespace vllm_xpu_xe2
 
 }  // namespace cutlass::fmha::collective
 
