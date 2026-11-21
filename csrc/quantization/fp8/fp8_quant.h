@@ -8,10 +8,12 @@
 
 #include "quantization/fp8/quant_utils.h"
 #include "quantization/utils.h"
+#include "quant_ns.h"
 
 using namespace at;
 
 namespace vllm {
+inline namespace VLLM_QUANT_KERNEL_NS {
 
 // Device fp32 divide is not correctly rounded; refine it with one FMA step so
 // the scale matches the IEEE `absmax / fp8_max`. `fp8_max` must be a
@@ -126,5 +128,7 @@ class segmented_max_reduction_strided {
     }
   }
 };
+
+}  // namespace VLLM_QUANT_KERNEL_NS
 
 }  // namespace vllm

@@ -2,6 +2,7 @@
 
 #include "utils.h"
 #include "dispatch_utils.h"
+#include "sycl_launch.h"
 
 namespace vllm {
 namespace moe {
@@ -65,11 +66,10 @@ void InitExpertMapLauncher(
     const int ep_rank,
     const int ep_size,
     sycl::queue& queue) {
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        InitExpertMap::get_nd_range(num_experts, ep_size),
-        InitExpertMap{expert_map, num_experts, ep_rank, ep_size});
-  });
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      InitExpertMap::get_nd_range(num_experts, ep_size),
+      InitExpertMap{expert_map, num_experts, ep_rank, ep_size});
 }
 
 }  // namespace moe

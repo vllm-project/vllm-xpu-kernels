@@ -8,10 +8,8 @@ import pytest
 import torch
 
 import vllm_xpu_kernels.flash_attn_interface as fai
-from vllm_xpu_kernels.flash_attn_interface import (
-    build_decode_split_plan,
-    flash_attn_varlen_func,
-)
+from vllm_xpu_kernels.flash_attn_interface import (build_decode_split_plan,
+                                                   flash_attn_varlen_func)
 
 _ALLOW_ENV = "VLLM_XPU_ATTN_ALLOW_FALLBACK"
 
@@ -78,11 +76,26 @@ def test_build_decode_split_plan_accepts_cpu_and_list():
     assert torch.equal(splits, splits2)
 
 
-def test_build_decode_split_plan_rejects_device_tensor():
+def test_build_decode_split_plan_device_tensor_eager_d2h():
     if not torch.xpu.is_available():
-        # Still validate the check using a meta/cpu-fake path: construct
-        # a non-CPU tensor if CUDA/XPU unavailable by skipping.
+        pytest.skip("Need a non-CPU device to exercise the D2H path")
+    kv = torch.tensor([128, 256], dtype=torch.int32, device="xpu")
+    splits, work = build_decode_split_plan(
+        kv,
+        kv_tile=64,
+        num_kv_splits=8,
+        num_xe_cores=20,
+        num_heads_kv=2,
+    )
+    assert splits.dtype == torch.int32
+    assert work.ndim == 2 and work.size(1) == 4
+
+
+def test_build_decode_split_plan_rejects_device_tensor_when_capturing(
+        monkeypatch):
+    if not torch.xpu.is_available():
         pytest.skip("Need a non-CPU device to exercise the D2H guard")
+    monkeypatch.setattr(fai, "_is_xpu_capturing", lambda: True)
     kv = torch.tensor([128, 256], dtype=torch.int32, device="xpu")
     with pytest.raises(RuntimeError, match="host-side kv_lens"):
         build_decode_split_plan(
@@ -161,12 +174,25 @@ def test_capturing_raises_even_with_allow_fallback(monkeypatch):
         flash_attn_varlen_func(**args)
 
 
-def test_capturing_requires_preallocated_out(monkeypatch):
+def test_capturing_without_out_warns_not_raises(monkeypatch, caplog):
+    # Upstream graph-replay callers capture without a preallocated `out`;
+    # raising here aborted capture mid-region and leaked capture state
+    # into later tests. The function must warn and proceed instead.
     _require_fa2_xpu()
     monkeypatch.setattr(fai, "_is_xpu_capturing", lambda: True)
+    called = {"fwd": False}
+
+    def fake_fwd(*_a, **_k):
+        called["fwd"] = True
+        q = _a[0]
+        return (torch.empty_like(q), None)
+
+    monkeypatch.setattr(torch.ops._vllm_fa2_C, "varlen_fwd", fake_fwd)
     args = _minimal_varlen_args(torch.device("xpu"), with_out=False)
-    with pytest.raises(RuntimeError, match="preallocated `out`"):
+    with caplog.at_level(logging.WARNING, logger=fai.__name__):
         flash_attn_varlen_func(**args)
+    assert called["fwd"] is True
+    assert any("preallocated" in r.message for r in caplog.records)
 
 
 def test_device_host_kv_lens_split_plan_raises(monkeypatch):

@@ -96,14 +96,14 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 | File | Kernels | Use Case |
 |------|---------|----------|
 | `chunk_prefill_full.conf` | 240 | All combinations — supports every model |
-| `chunk_prefill_default.conf` | 100 | Llama, Qwen, DeepSeek MLA, Falcon, Gemma, Phi, GLM (default build) |
+| `chunk_prefill_default.conf` | 104 | Llama, Qwen, DeepSeek MLA, Falcon, Gemma, Phi, GLM (default build) |
 
 ### Paged Decode
 
 | File | Kernels | Use Case |
 |------|---------|----------|
 | `paged_decode_full.conf` | 384 | All combinations — supports every model |
-| `paged_decode_default.conf` | 48 | Llama, Qwen, DeepSeek MLA, Falcon, Starcoder2, Phi, VLM2Vec + pagesize=128 (default build) |
+| `paged_decode_default.conf` | 53 | Llama, Qwen, DeepSeek MLA, Falcon, Starcoder2, Phi, VLM2Vec + pagesize=128 (default build) |
 
 ### Recommended Config per Model Family
 

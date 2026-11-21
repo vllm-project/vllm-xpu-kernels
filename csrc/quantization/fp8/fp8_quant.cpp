@@ -3,16 +3,24 @@
 #include <ATen/xpu/XPUContext.h>
 #include <sycl/sycl.hpp>
 
+#include <algorithm>
+#include <limits>
+#include <type_traits>
+
 #include "dispatch_utils.h"
 #include "ops.h"
 #include "utils.h"
 
 #include "quantization/fp8/fp8_quant.h"
+#include "quantization/fp8/fp8_quant_asm.h"
 #include "quantization/fp8/quant_utils.h"
 #include "quantization/moe_scale_layout.h"
+#include "quantization/mx_quant_utils.h"
 #include "quantization/utils.h"
+#include "quant_ns.h"
 
 namespace vllm {
+inline namespace VLLM_QUANT_KERNEL_NS {
 
 // STRIDE_I_ZERO: true if scale_stride_i == 0 (per-tensor or per-channel)
 // STRIDE_J_ZERO: true if scale_stride_j == 0 (per-tensor or per-token)
@@ -110,6 +118,196 @@ class scaled_fp8_quant_kernel_strided_group_shape {
         const int gj = n / group_n;
         fp8::ConvertWithScaleOp<true, fp8_type> op{get_inv_scale_cached(gj)};
         op(token_out[n], token_in[n]);
+      }
+    }
+  }
+};
+
+// SI is the scale row stride: 0 = zero (one scale row for all tokens),
+// 1 = non-zero, -1 = uniform runtime switch. The one-row kernels (no
+// ELEM_SCALE) fix it at compile time, which is up to 6% faster on CRI; the
+// ELEM_SCALE kernels keep the runtime switch to save binary size.
+template <
+    typename scalar_t,
+    typename fp8_type,
+    bool ELEM_SCALE,
+    int VEC,
+    int CPT,
+    int SI = -1>
+class scaled_fp8_quant_kernel_strided_group_shape_vec {
+ private:
+  fp8_type* out;
+  const scalar_t* input;
+  const float* scale;
+  int hidden_size;
+  int64_t in_row_stride;
+  int64_t out_row_stride;
+  int group_m;
+  int group_n;
+  int chunks_per_group;
+  int64_t num_tokens;
+  int64_t scale_stride_i;
+  int64_t scale_stride_j;
+  int col_tiles;
+
+ public:
+  scaled_fp8_quant_kernel_strided_group_shape_vec(
+      fp8_type* out_,
+      const scalar_t* input_,
+      const float* scale_,
+      int hidden_size_,
+      int64_t in_row_stride_,
+      int64_t out_row_stride_,
+      int group_m_,
+      int group_n_,
+      int chunks_per_group_,
+      int64_t num_tokens_,
+      int64_t scale_stride_i_,
+      int64_t scale_stride_j_,
+      int col_tiles_)
+      : out(out_),
+        input(input_),
+        scale(scale_),
+        hidden_size(hidden_size_),
+        in_row_stride(in_row_stride_),
+        out_row_stride(out_row_stride_),
+        group_m(group_m_),
+        group_n(group_n_),
+        chunks_per_group(chunks_per_group_),
+        num_tokens(num_tokens_),
+        scale_stride_i(scale_stride_i_),
+        scale_stride_j(scale_stride_j_),
+        col_tiles(col_tiles_) {}
+
+  void operator()
+      [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
+    const int64_t gid = item.get_group(0);
+    const int64_t row_blocks = item.get_group_range(0) / col_tiles;
+    const int ct = ELEM_SCALE ? static_cast<int>(gid % col_tiles) : 0;
+    const int64_t rb = ELEM_SCALE ? gid / col_tiles : gid;
+    const int local_range = static_cast<int>(item.get_local_range(0));
+    const int thread_begin =
+        ct * local_range + static_cast<int>(item.get_local_id(0));
+
+    const int num_chunks = hidden_size / VEC;
+    const int threads_per_row = num_chunks / CPT;
+    for (int t = thread_begin; t < threads_per_row;
+         t += ELEM_SCALE ? threads_per_row : local_range) {
+      const int c0 = t * CPT;
+
+      constexpr int NUM_SCALES = ELEM_SCALE ? VEC * CPT : 1;
+      const int64_t col_off =
+          ELEM_SCALE
+              ? 0
+              : static_cast<int64_t>(c0 / chunks_per_group) * scale_stride_j;
+      float inv_scale[NUM_SCALES];
+      auto load_inv_scale = [&](int64_t scale_row_base) {
+        if constexpr (ELEM_SCALE) {
+          // The VEC * CPT columns are contiguous, so step the group index
+          // instead of dividing every column by group_n.
+          const int col0 = c0 * VEC;
+          int g = col0 / group_n;
+          int rem = col0 - g * group_n;
+#pragma unroll
+          for (int i = 0; i < NUM_SCALES; ++i) {
+            inv_scale[i] =
+                1.0f /
+                scale
+                    [scale_row_base + static_cast<int64_t>(g) * scale_stride_j];
+            if (++rem == group_n) {
+              rem = 0;
+              ++g;
+            }
+          }
+        } else {
+          inv_scale[0] = 1.0f / scale[scale_row_base + col_off];
+        }
+      };
+      // Only the multi-row ELEM_SCALE loop hoists a row-invariant scale; the
+      // one-row path loads it next to the input, without a branch in between,
+      // so the two loads overlap (a zero stride yields scale row 0).
+      const bool hoist_scale = ELEM_SCALE && scale_stride_i == 0;
+      if (hoist_scale) {
+        load_inv_scale(0);
+      }
+
+      const auto* vin = reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(input);
+      auto* vout = reinterpret_cast<vec_n_t<fp8_type, VEC>*>(out);
+      const int64_t in_vstride = in_row_stride / VEC;
+      const int64_t out_vstride = out_row_stride / VEC;
+
+      const int64_t row_end = ELEM_SCALE ? num_tokens : rb + 1;
+      const int64_t row_step = ELEM_SCALE ? row_blocks : 1;
+      for (int64_t row = rb; row < row_end; row += row_step) {
+        const auto* row_in = vin + row * in_vstride;
+        auto* row_out = vout + row * out_vstride;
+
+        if (!hoist_scale) {
+          // Skipping the integer division matters on the latency-bound
+          // per-tensor launches.
+          int64_t scale_row_base = 0;
+          if constexpr (SI == 1) {
+            scale_row_base =
+                static_cast<int64_t>(static_cast<int>(row) / group_m) *
+                scale_stride_i;
+          } else if (SI == -1 && scale_stride_i != 0) {
+            scale_row_base =
+                static_cast<int64_t>(static_cast<int>(row) / group_m) *
+                scale_stride_i;
+          }
+          load_inv_scale(scale_row_base);
+        }
+
+        vec_n_t<scalar_t, VEC> xv[CPT];
+#pragma unroll
+        for (int j = 0; j < CPT; ++j) {
+          xv[j] = row_in[c0 + j];
+        }
+
+#pragma unroll
+        for (int j = 0; j < CPT; ++j) {
+          constexpr bool kPackStore = VEC % 4 == 0;
+#ifdef VLLM_FP8_QUANT_ASM_ENABLED
+          // With a uniform scale, or groups that are a multiple of 4 wide,
+          // each aligned run of 4 elements shares one scale and converts as
+          // one batched fcvt.
+          if constexpr (kPackStore) {
+            if (!ELEM_SCALE || group_n % 4 == 0) {
+              PackedBytes<VEC> packed;
+  #pragma unroll
+              for (int i = 0; i < VEC / 4; ++i) {
+                const float x4[4] = {
+                    static_cast<float>(xv[j].val[4 * i]),
+                    static_cast<float>(xv[j].val[4 * i + 1]),
+                    static_cast<float>(xv[j].val[4 * i + 2]),
+                    static_cast<float>(xv[j].val[4 * i + 3])};
+                packed.words[i] = fp8::scaled_quant4_asm<fp8_type>(
+                    x4, inv_scale[ELEM_SCALE ? j * VEC + 4 * i : 0]);
+              }
+              packed.store(row_out + c0 + j);
+              continue;
+            }
+          }
+#endif
+          vec_n_t<fp8_type, VEC> o;
+          PackedBytes<kPackStore ? VEC : 4> packed;
+#pragma unroll
+          for (int k = 0; k < VEC; ++k) {
+            const float inv = inv_scale[ELEM_SCALE ? j * VEC + k : 0];
+            {
+              fp8::ConvertWithScaleOp<true, fp8_type> op{inv};
+              op(o.val[k], xv[j].val[k]);
+            }
+            if constexpr (kPackStore) {
+              packed.set(k, o.val[k].x);
+            }
+          }
+          if constexpr (kPackStore) {
+            packed.store(row_out + c0 + j);
+          } else {
+            row_out[c0 + j] = o;
+          }
+        }
       }
     }
   }
@@ -265,7 +463,7 @@ class per_token_group_quant_8bit_kernel {
     const float inverted_scale = 1.0f / (y_s);
     constexpr int VEC_SIZE = 4;
     if (can_vectorize) {
-      fp8::ConvertWithScaleOp<true, fp8_type> op{inverted_scale};
+      fp8::ScaledQuantOpAsm<true, scalar_t, fp8_type> op{inverted_scale};
       vectorize_with_alignment<VEC_SIZE>(
           group_input,
           group_output,
@@ -275,7 +473,7 @@ class per_token_group_quant_8bit_kernel {
           op);
     } else {
       for (int i = lane_id; i < group_size; i += threads_per_group) {
-        fp8::ConvertWithScaleOp<true, fp8_type> op{inverted_scale};
+        fp8::ScaledQuantOpAsm<true, scalar_t, fp8_type> op{inverted_scale};
         op(group_output[i], group_input[i]);
       }
     }
@@ -288,7 +486,7 @@ class per_token_group_quant_8bit_kernel {
 // cover a group. This maximizes global-memory bandwidth versus the
 // 1-element-per-thread path. Used for the common case where group_size is a
 // multiple of VEC.
-template <typename scalar_t, typename fp8_type>
+template <typename scalar_t, typename fp8_type, int CPT>
 class per_token_group_quant_8bit_vec_kernel {
  private:
   fp8_type* out;
@@ -302,6 +500,8 @@ class per_token_group_quant_8bit_vec_kernel {
   const int scale_num_rows;
   const int scale_stride;
   bool is_column_major;
+  const int num_rows;
+  const int rows_per_wg;
   MoEScaleLayout moe_layout;
 
  public:
@@ -317,6 +517,8 @@ class per_token_group_quant_8bit_vec_kernel {
       const int scale_num_rows_,
       const int scale_stride_,
       bool is_column_major_,
+      const int num_rows_,
+      const int rows_per_wg_,
       MoEScaleLayout moe_layout_ = {})
       : out(out_),
         scale(scale_),
@@ -329,37 +531,63 @@ class per_token_group_quant_8bit_vec_kernel {
         scale_num_rows(scale_num_rows_),
         scale_stride(scale_stride_),
         is_column_major(is_column_major_),
+        num_rows(num_rows_),
+        rows_per_wg(rows_per_wg_),
         moe_layout(moe_layout_) {}
 
   void operator()
       [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
-    const int row = static_cast<int>(item.get_group(0));
     const int tid = static_cast<int>(item.get_local_id(0));
     const int local_range = static_cast<int>(item.get_local_range(0));
     auto sg = item.get_sub_group();
-    const int lane = sg.get_local_id()[0];
 
     constexpr int VEC = 16 / sizeof(scalar_t);
-    const int lanes_per_group = group_size / VEC;
+    const int chunks_per_group = group_size / VEC;
+    const int lanes_per_group = chunks_per_group / CPT;
     const int num_chunks = hidden / VEC;
+    const int threads_per_row = num_chunks / CPT;
+
+#if defined(VLLM_XPU_ENABLE_XE3) && !defined(VLLM_FP8_QUANT_DISABLE_ASM)
+    // One row per work-group skips the runtime divisor (small launches).
+    const bool one_row = rows_per_wg == 1;
+    const int stride = one_row ? local_range : local_range / rows_per_wg;
+    const int row =
+        one_row
+            ? static_cast<int>(item.get_group(0))
+            : static_cast<int>(item.get_group(0)) * rows_per_wg + tid / stride;
+    const int t0 = one_row ? tid : tid % stride;
+    if (row >= num_rows) return;
+#else
+    // Fallback build: one row per work-group; literal index math keeps the
+    // original addressing (a runtime divisor measurably hurts here).
+    const int stride = local_range;
+    const int row = static_cast<int>(item.get_group(0));
+    const int t0 = tid;
+#endif
 
     scalar_t const* row_in = input + static_cast<int64_t>(row) * hidden;
     fp8_type* row_out = out + static_cast<int64_t>(row) * hidden;
     const auto* vin = reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(row_in);
-    auto* vout = reinterpret_cast<vec_n_t<fp8_type, VEC>*>(row_out);
 
-    for (int base = 0; base < num_chunks; base += local_range) {
-      const int c = base + tid;
-      const bool active = c < num_chunks;
+    for (int base = 0; base < threads_per_row; base += stride) {
+      const int t = base + t0;
+      const bool active = t < threads_per_row;
+      const int c0 = t * CPT;
 
-      vec_n_t<scalar_t, VEC> xv;
+      vec_n_t<scalar_t, VEC> xv[CPT];
       float lane_absmax = active ? eps : 0.0f;
       if (active) {
-        xv = vin[c];
 #pragma unroll
-        for (int k = 0; k < VEC; ++k) {
-          lane_absmax =
-              sycl::max(lane_absmax, sycl::fabs(static_cast<float>(xv.val[k])));
+        for (int j = 0; j < CPT; ++j) {
+          xv[j] = vin[c0 + j];
+        }
+#pragma unroll
+        for (int j = 0; j < CPT; ++j) {
+#pragma unroll
+          for (int k = 0; k < VEC; ++k) {
+            lane_absmax = sycl::max(
+                lane_absmax, sycl::fabs(static_cast<float>(xv[j].val[k])));
+          }
         }
       }
 
@@ -377,8 +605,16 @@ class per_token_group_quant_8bit_vec_kernel {
             sycl::ceil(sycl::log2(sycl::fmax(sycl::fabs(y_s), 1e-10f))));
       }
 
-      if (active && (lane % lanes_per_group) == 0) {
-        const int g_idx = c / lanes_per_group;
+#if defined(VLLM_XPU_ENABLE_XE3) && !defined(VLLM_FP8_QUANT_DISABLE_ASM)
+      // A sub-group can span two rows when rows_per_wg > 1, so select on the
+      // per-row work-item index instead of the lane id.
+      const int scale_sel = t;
+#else
+      const int scale_sel = sg.get_local_id()[0];
+#endif
+      if (active &&
+          (lanes_per_group <= 1 || (scale_sel % lanes_per_group) == 0)) {
+        const int g_idx = c0 / chunks_per_group;
         if (moe_layout.enabled()) {
           moe_layout.store(row, g_idx, y_s);
         } else {
@@ -397,15 +633,146 @@ class per_token_group_quant_8bit_vec_kernel {
 
       if (active) {
         const float inv = 1.0f / y_s;
-        fp8::ConvertWithScaleOp<true, fp8_type> op{inv};
-        vec_n_t<fp8_type, VEC> o;
-#pragma unroll
-        for (int k = 0; k < VEC; ++k) {
-          op(o.val[k], static_cast<float>(xv.val[k]));
+#if defined(VLLM_XPU_ENABLE_XE3) && !defined(VLLM_FP8_QUANT_DISABLE_ASM)
+        // Asm build: the store is the limiter, so emit one contiguous
+        // CPT*VEC-byte store instead of CPT strided ones.
+        constexpr int kWords = CPT * VEC / 4;
+        auto* vout = reinterpret_cast<vec_n_t<uint32_t, kWords>*>(row_out);
+        vec_n_t<uint32_t, kWords> o;
+  #pragma unroll
+        for (int i = 0; i < kWords; ++i) {
+          float x4[4];
+  #pragma unroll
+          for (int q = 0; q < 4; ++q) {
+            const int e = 4 * i + q;
+            x4[q] = static_cast<float>(xv[e / VEC].val[e % VEC]);
+          }
+          o.val[i] = fp8::scaled_quant4_asm<fp8_type>(x4, inv);
         }
-        vout[c] = o;
+        vout[t] = o;
+#else
+        // Fallback build: the software converter dominates and a wider store
+        // only adds register pressure.
+        auto* vout = reinterpret_cast<vec_n_t<fp8_type, VEC>*>(row_out);
+        fp8::ConvertWithScaleOp<true, fp8_type> op{inv};
+  #pragma unroll
+        for (int j = 0; j < CPT; ++j) {
+          vec_n_t<fp8_type, VEC> o;
+  #pragma unroll
+          for (int k = 0; k < VEC; ++k) {
+            op(o.val[k], static_cast<float>(xv[j].val[k]));
+          }
+          vout[c0 + j] = o;
+        }
+#endif
       }
     }
+  }
+};
+
+// MXFP8 of 16-bit input, one lane per 16-byte vector, so a group consists of 4
+// lanes: vector v is in group v / 4. kMoE selects the routed MoE scale
+// surface; row- vs column-major is a uniform runtime switch (binary size).
+template <typename scalar_t, typename fp8_type, typename scale_t, bool kMoE>
+class per_token_group_quant_mxfp8_kernel {
+ private:
+  fp8_type* __restrict__ out;
+  scale_t* __restrict__ scale;
+  scalar_t const* __restrict__ input;
+  const int num_vecs;
+  float eps;
+  const int scale_num_rows;
+  const int scale_stride;
+  MoEScaleLayout moe_layout;
+  mx::ScaleLayout layout;
+
+ public:
+  per_token_group_quant_mxfp8_kernel(
+      fp8_type* out_,
+      scale_t* scale_,
+      scalar_t const* input_,
+      const int num_vecs_,
+      float eps_,
+      const int scale_num_rows_,
+      const int scale_stride_,
+      MoEScaleLayout moe_layout_,
+      mx::ScaleLayout layout_)
+      : out(out_),
+        scale(scale_),
+        input(input_),
+        num_vecs(num_vecs_),
+        eps(eps_),
+        scale_num_rows(scale_num_rows_),
+        scale_stride(scale_stride_),
+        moe_layout(moe_layout_),
+        layout(layout_) {}
+
+  void operator()
+      [[sycl::reqd_sub_group_size(32),
+        sycl::reqd_work_group_size(mx::kWorkGroupSize)]] (
+          sycl::nd_item<1> item) const {
+    constexpr int VEC = mx::kVec;
+    const int v = mx::flat_index(item);
+    const bool active = v < num_vecs;
+
+    float x[VEC];
+    float absmax = eps;
+    if (active) {
+      const auto xv = reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(input)[v];
+#pragma unroll
+      for (int k = 0; k < VEC; ++k) {
+        x[k] = static_cast<float>(xv.val[k]);
+        absmax = sycl::fmax(absmax, sycl::fabs(x[k]));
+      }
+    }
+    auto sg = item.get_sub_group();
+    absmax = mx::group_absmax(sg, absmax, mx::kLanesPerGroup);
+    float inv_scale;
+    const float y_s = mx::mxfp8_scale<fp8_type>(absmax, inv_scale);
+
+    const bool packed_e8m0 = !kMoE && !std::is_same_v<scale_t, float> &&
+                             layout == mx::ScaleLayout::kRowMajor;
+    if (packed_e8m0) {
+      using scale8_t = vec_n_t<uint8_t, 8>;
+      const uint32_t e = MoEScaleLayout::encode(y_s);
+      scale8_t packed;
+#pragma unroll
+      for (int k = 0; k < 8; ++k) {
+        packed.val[k] = static_cast<uint8_t>(
+            sycl::select_from_group(sg, e, k * mx::kLanesPerGroup));
+      }
+      if (active && sg.get_local_linear_id() == 0) {
+        const int g = v / mx::kLanesPerGroup;
+        const int num_g = num_vecs / mx::kLanesPerGroup;
+        if (g + 8 <= num_g && reinterpret_cast<uintptr_t>(scale + g) % 8 == 0) {
+          *reinterpret_cast<scale8_t*>(scale + g) = packed;
+        } else {
+          for (int k = 0; k < 8 && g + k < num_g; ++k) {
+            scale[g + k] = packed.val[k];
+          }
+        }
+      }
+    }
+    if (!active) return;
+
+    if (!packed_e8m0 && v % mx::kLanesPerGroup == 0) {
+      const int g = v / mx::kLanesPerGroup;
+      scale_t s;
+      if constexpr (std::is_same_v<scale_t, float>) {
+        s = y_s;
+      } else {
+        s = MoEScaleLayout::encode(y_s);
+      }
+      if constexpr (kMoE) {
+        moe_layout.store(g / moe_layout.scale_k, g % moe_layout.scale_k, y_s);
+      } else if (layout == mx::ScaleLayout::kColMajor) {
+        scale[(g % scale_num_rows) * scale_stride + g / scale_num_rows] = s;
+      } else {
+        scale[g] = s;
+      }
+    }
+    reinterpret_cast<mx::fp8x8_t*>(out)[v] =
+        mx::mxfp8_pack8<fp8_type, /*EXACT_IN_FP16=*/true>(x, inv_scale);
   }
 };
 
@@ -496,7 +863,11 @@ class dynamic_per_token_scaled_fp8_quant_kernel {
   }
 };
 
+}  // namespace VLLM_QUANT_KERNEL_NS
+
 }  // namespace vllm
+
+namespace VLLM_QUANT_NS {
 
 void static_scaled_fp8_quant(
     torch::Tensor& out,          // [..., d]
@@ -651,13 +1022,144 @@ void static_scaled_fp8_quant(
   const at::DeviceGuard device_guard(input.device());
 
   auto& queue = vllm::xpu::vllmGetQueue();
+  const int eu_count = static_cast<int>(
+      queue.get_device().get_info<sycl::info::device::max_compute_units>());
+
+  constexpr int kWorkGroupMultiple = 32;
+  constexpr int kMaxWorkGroup = 1024;
+  constexpr int kWorkItemsPerEU = 128;
+  constexpr int kMaxScalesPerItem = 16;
+  constexpr int64_t kMaxRowsPerItem = 8;
+  const int vec = 16 / input.element_size();
+  // The vectorized kernel is only built for 16-bit input and e4m3 output;
+  // the other combinations take the generic kernel to save binary size.
+  bool vectorizable = input.element_size() == 2 &&
+                      out.scalar_type() == at::ScalarType::Float8_e4m3fn &&
+                      reinterpret_cast<uintptr_t>(input.data_ptr()) % 16 == 0 &&
+                      reinterpret_cast<uintptr_t>(out.data_ptr()) % vec == 0 &&
+                      in_row_stride % vec == 0 && out_row_stride % vec == 0 &&
+                      hidden_size % vec == 0;
+  const bool elem_scale = scale_stride_j != 0 && group_n % vec != 0;
+  const int num_chunks = hidden_size / vec;
+  const int chunks_per_group =
+      (scale_stride_j == 0 || elem_scale) ? num_chunks : group_n / vec;
+  int chunks_per_item = 1;
+  vllm::dispatch_quant_chunks(
+      num_tokens, num_chunks, chunks_per_group, eu_count, [&](auto tag) {
+        chunks_per_item = decltype(tag)::value;
+      });
+  // On BMG, one 16-byte chunk per work-item measured 10-30% faster than
+  // several adjacent chunks per work-item for T >= 128; Xe3P prefers the
+  // wider items.
+  if (!elem_scale && vllm::xpu::is_bmg()) {
+    chunks_per_item = 1;
+  }
+  if (elem_scale) {
+    chunks_per_item = std::min(chunks_per_item, kMaxScalesPerItem / vec);
+  }
+  const int threads_per_row = num_chunks / chunks_per_item;
+  const int work_group = std::clamp(
+      (threads_per_row + kWorkGroupMultiple - 1) / kWorkGroupMultiple *
+          kWorkGroupMultiple,
+      kWorkGroupMultiple,
+      elem_scale ? kWorkItemsPerEU : kMaxWorkGroup);
+  const int col_tiles =
+      elem_scale ? std::max(1, (threads_per_row + work_group - 1) / work_group)
+                 : 1;
+  const int64_t row_blocks =
+      elem_scale
+          ? std::min(
+                num_tokens,
+                std::max(
+                    (num_tokens + kMaxRowsPerItem - 1) / kMaxRowsPerItem,
+                    std::max<int64_t>(
+                        1,
+                        static_cast<int64_t>(eu_count) * kWorkItemsPerEU /
+                            (static_cast<int64_t>(col_tiles) * work_group))))
+          : num_tokens;
+  vectorizable = vectorizable && (!elem_scale || row_blocks < num_tokens);
+  const sycl::nd_range<1> range(
+      sycl::range<1>(static_cast<size_t>(col_tiles) * row_blocks * work_group),
+      sycl::range<1>(work_group));
+
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
         VLLM_DISPATCH_FP8_TYPES(
             out.scalar_type(), "scaled_fp8_quant_kernel_fp8_type", [&] {
+              auto* out_ptr = out.data_ptr<fp8_t>();
+              auto* in_ptr = input.data_ptr<scalar_t>();
+              auto* scale_ptr = scale.data_ptr<float>();
+
+              constexpr int VEC = 16 / sizeof(scalar_t);
+
+              if (vectorizable) {
+                auto launch = [&](auto elem_tag, auto cpt_tag) {
+                  auto go = [&](auto si_tag) {
+                    // vectorizable is always false for fp32 inputs and
+                    // e5m2 output; skip the instantiation.
+                    if constexpr (
+                        sizeof(scalar_t) == 2 &&
+                        std::is_same_v<fp8_t, c10::Float8_e4m3fn>)
+                      queue.submit([&](sycl::handler& cgh) {
+                        cgh.parallel_for(
+                            range,
+                            vllm::
+                                scaled_fp8_quant_kernel_strided_group_shape_vec<
+                                    scalar_t,
+                                    fp8_t,
+                                    decltype(elem_tag)::value,
+                                    VEC,
+                                    decltype(cpt_tag)::value,
+                                    decltype(si_tag)::value>(
+                                    out_ptr,
+                                    in_ptr,
+                                    scale_ptr,
+                                    hidden_size,
+                                    in_row_stride,
+                                    out_row_stride,
+                                    group_m,
+                                    group_n,
+                                    chunks_per_group,
+                                    num_tokens,
+                                    scale_stride_i,
+                                    scale_stride_j,
+                                    col_tiles));
+                      });
+                  };
+                  if constexpr (decltype(elem_tag)::value) {
+                    go(std::integral_constant<int, -1>{});
+                  } else if (scale_stride_i == 0) {
+                    go(std::integral_constant<int, 0>{});
+                  } else {
+                    go(std::integral_constant<int, 1>{});
+                  }
+                };
+
+                auto dispatch = [&](auto elem_tag) {
+                  // elem_scale caps chunks_per_item at kMaxScalesPerItem /
+                  // VEC, so 4 is unreachable there for 2-byte inputs.
+                  constexpr bool kHasCpt4 = !decltype(elem_tag)::value ||
+                                            4 * VEC <= kMaxScalesPerItem;
+                  if (kHasCpt4 && chunks_per_item == 4) {
+                    if constexpr (kHasCpt4) {
+                      launch(elem_tag, std::integral_constant<int, 4>{});
+                    }
+                  } else if (chunks_per_item == 2) {
+                    launch(elem_tag, std::integral_constant<int, 2>{});
+                  } else {
+                    launch(elem_tag, std::integral_constant<int, 1>{});
+                  }
+                };
+                if (elem_scale) {
+                  dispatch(std::true_type{});
+                } else {
+                  dispatch(std::false_type{});
+                }
+                return;
+              }
+
               VLLM_DISPATCH_BOOL(scale_stride_i == 0, S0_ZERO, [&] {
                 VLLM_DISPATCH_BOOL(scale_stride_j == 0, S1_ZERO, [&] {
-                  // Launch the kernel
                   queue.submit([&](sycl::handler& cgh) {
                     auto kernel =
                         vllm::scaled_fp8_quant_kernel_strided_group_shape<
@@ -665,9 +1167,9 @@ void static_scaled_fp8_quant(
                             fp8_t,
                             S0_ZERO,
                             S1_ZERO>(
-                            out.data_ptr<fp8_t>(),
-                            input.data_ptr<scalar_t>(),
-                            scale.data_ptr<float>(),
+                            out_ptr,
+                            in_ptr,
+                            scale_ptr,
                             hidden_size,
                             in_row_stride,
                             out_row_stride,
@@ -794,8 +1296,13 @@ void per_token_group_quant_fp8(
       !moe_layout.enabled() && output_s.stride(0) < output_s.stride(1);
   const int scale_num_rows = output_s.size(1);
   const int scale_stride = output_s.stride(1);
-  float* const scale_ptr =
-      moe_layout.enabled() ? nullptr : output_s.data_ptr<float>();
+  const bool scale_is_e8m0 =
+      !moe_layout.enabled() &&
+      (output_s.scalar_type() == at::ScalarType::Float8_e8m0fnu ||
+       output_s.scalar_type() == at::ScalarType::Byte);
+  float* const scale_ptr = moe_layout.enabled() || scale_is_e8m0
+                               ? nullptr
+                               : output_s.data_ptr<float>();
 
   // Fast vectorized path: one work-group per row with 16-byte loads. Requires
   // group_size to be a multiple of the (dtype-dependent) vector width.
@@ -817,42 +1324,178 @@ void per_token_group_quant_fp8(
                        (hidden % vec_width == 0) &&
                        (group_size / vec_width <= 32);
 
-  if (use_vec) {
+  const int64_t mx_num_vecs = input.numel() / vllm::mx::kVec;
+  // Groups are numbered over the flat tensor, so hidden must be a multiple of
+  // the group size (32).
+  const bool use_mx = group_size == vllm::mx::kGroupSize && scale_ue8m0 &&
+                      elem_size == 2 && hidden % vllm::mx::kGroupSize == 0 &&
+                      mx_num_vecs <= std::numeric_limits<int>::max() &&
+                      reinterpret_cast<uintptr_t>(input.data_ptr()) % 16 == 0 &&
+                      reinterpret_cast<uintptr_t>(output_q.data_ptr()) % 8 == 0;
+  TORCH_CHECK(
+      !scale_is_e8m0 || use_mx,
+      "e8m0 output_s requires group_size 32, scale_ue8m0, 16-bit input, a "
+      "hidden size divisible by 32 and aligned tensors");
+  if (use_mx) {
+    if (mx_num_vecs == 0) return;
+    auto& mqueue = vllm::xpu::vllmGetQueue();
+    const int64_t wg = vllm::mx::kWorkGroupSize;
+    sycl::range<1> mgrid((mx_num_vecs + wg - 1) / wg);
+    sycl::range<1> mblock(wg);
+    VLLM_DISPATCH_HALF_TYPES(
+        input.scalar_type(), "per_token_group_quant_mxfp8_scale_type", [&] {
+          VLLM_DISPATCH_FP8_TYPES(
+              output_q.scalar_type(), "per_token_group_quant_mxfp8_type", [&] {
+                auto launch = [&](auto out_s, auto layout_tag) {
+                  constexpr auto layout = decltype(layout_tag)::value;
+                  constexpr bool kMoE = layout == vllm::mx::ScaleLayout::kMoE;
+                  mqueue.submit([&](sycl::handler& cgh) {
+                    cgh.parallel_for(
+                        sycl::nd_range<1>(mgrid * mblock, mblock),
+                        vllm::per_token_group_quant_mxfp8_kernel<
+                            scalar_t,
+                            fp8_t,
+                            std::remove_pointer_t<decltype(out_s)>,
+                            kMoE>(
+                            output_q.data_ptr<fp8_t>(),
+                            out_s,
+                            input.data_ptr<scalar_t>(),
+                            static_cast<int>(mx_num_vecs),
+                            eps,
+                            scale_num_rows,
+                            scale_stride,
+                            moe_layout,
+                            layout));
+                  });
+                };
+                using L = vllm::mx::ScaleLayout;
+                auto by_layout = [&](auto out_s) {
+                  if (moe_layout.enabled()) {
+                    // MoE scales go through moe_layout; out_s is unused.
+                    if constexpr (std::is_same_v<decltype(out_s), float*>) {
+                      launch(out_s, std::integral_constant<L, L::kMoE>{});
+                    }
+                  } else if (is_column_major) {
+                    launch(out_s, std::integral_constant<L, L::kColMajor>{});
+                  } else {
+                    launch(out_s, std::integral_constant<L, L::kRowMajor>{});
+                  }
+                };
+                if (scale_is_e8m0) {
+                  by_layout(reinterpret_cast<uint8_t*>(output_s.data_ptr()));
+                } else {
+                  by_layout(scale_ptr);
+                }
+              });
+        });
+    return;
+  }
+
+  // The vec kernel reduces a group within one 32-lane sub-group, so groups
+  // spanning more lanes (e.g. fp32 group 256 at CPT == 1) take the generic
+  // kernel below.
+  constexpr int kVecMaxLanesPerGroup = 32;
+  const bool vec_launched = use_vec && [&] {
     const int num_groups_per_row = hidden / group_size;
+    const int chunks_per_group = group_size / vec_width;
     const int num_chunks = hidden / vec_width;
-    int wg = std::min<int>(((num_chunks + 31) / 32) * 32, 1024);
-    if (wg < 32) wg = 32;
-    sycl::range<1> vgrid(num_tokens);
-    sycl::range<1> vblock(wg);
     auto& vqueue = vllm::xpu::vllmGetQueue();
+    const int eu_count = static_cast<int>(
+        vqueue.get_device().get_info<sycl::info::device::max_compute_units>());
+    const long long saturate_wi = static_cast<long long>(eu_count) * 128;
+    const long long base_wi = static_cast<long long>(num_tokens) * num_chunks;
+    // Larger CPT costs registers and fewer work-items, smaller CPT costs more
+    // load/store messages.
+#if defined(VLLM_XPU_ENABLE_XE3) && !defined(VLLM_FP8_QUANT_DISABLE_ASM)
+    // Asm build: CPT == 2 already fills a full store message.
+    static constexpr int kCptCandidates[] = {2};
+#else
+    // Fallback build: the software float->e4m3 converter dominates, so amortise
+    // it over as many chunks as possible.
+    static constexpr int kCptCandidates[] = {4, 2};
+#endif
+    // Wider per-thread tiles are only specialised for 16-bit input and e4m3
+    // output (binary size); the rest keep one chunk per thread.
+    const bool wide = input.element_size() == 2 &&
+                      output_q.scalar_type() == at::ScalarType::Float8_e4m3fn;
+    int cpt = 1;
+    for (int c : kCptCandidates) {
+      if (wide && chunks_per_group % c == 0 && base_wi / c >= saturate_wi) {
+        cpt = c;
+        break;
+      }
+    }
+    if (chunks_per_group / cpt > kVecMaxLanesPerGroup) return false;
+    const int threads_per_row = num_chunks / cpt;
+#if defined(VLLM_XPU_ENABLE_XE3) && !defined(VLLM_FP8_QUANT_DISABLE_ASM)
+    // Target ~256 lanes per work-group: pack narrow rows together rather than
+    // leaving lanes idle or spawning tiny work-groups.
+    int rows_per_wg = 256 / std::max(threads_per_row, 1);
+    rows_per_wg = std::min(std::max(rows_per_wg, 1), 8);
+    while (rows_per_wg & (rows_per_wg - 1))
+      rows_per_wg &= rows_per_wg - 1;
+#else
+    // Fallback build: the converter, not the dispatch, is the limit. The
+    // kernel's fallback branch hardcodes this, so it must stay 1.
+    const int rows_per_wg = 1;
+#endif
+    int wg =
+        std::min<int>(((threads_per_row * rows_per_wg + 31) / 32) * 32, 1024);
+    if (wg < 32) wg = 32;
+    sycl::range<1> vgrid((num_tokens + rows_per_wg - 1) / rows_per_wg);
+    sycl::range<1> vblock(wg);
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "per_token_group_quant_8bit_vec_scale_type", [&] {
           VLLM_DISPATCH_FP8_TYPES(
               output_q.scalar_type(),
               "per_token_group_quant_8bit_vec_fp8_type",
               [&] {
-                vqueue.submit([&](sycl::handler& cgh) {
-                  auto kernel = vllm::
-                      per_token_group_quant_8bit_vec_kernel<scalar_t, fp8_t>(
-                          output_q.data_ptr<fp8_t>(),
-                          scale_ptr,
-                          input.data_ptr<scalar_t>(),
-                          group_size,
-                          hidden,
-                          num_groups_per_row,
-                          eps,
-                          scale_ue8m0,
-                          scale_num_rows,
-                          scale_stride,
-                          is_column_major,
-                          moe_layout);
-                  cgh.parallel_for(
-                      sycl::nd_range<1>(vgrid * vblock, vblock), kernel);
-                });
+                auto launch = [&](auto cpt_tag) {
+                  // cpt is always 1 without `wide`, so fold the wider tags
+                  // onto the CPT = 1 instantiation.
+                  constexpr int CPT =
+                      sizeof(scalar_t) == 2 &&
+                              std::is_same_v<fp8_t, c10::Float8_e4m3fn>
+                          ? decltype(cpt_tag)::value
+                          : 1;
+                  vqueue.submit([&](sycl::handler& cgh) {
+                    auto kernel = vllm::per_token_group_quant_8bit_vec_kernel<
+                        scalar_t,
+                        fp8_t,
+                        CPT>(
+                        output_q.data_ptr<fp8_t>(),
+                        scale_ptr,
+                        input.data_ptr<scalar_t>(),
+                        group_size,
+                        hidden,
+                        num_groups_per_row,
+                        eps,
+                        scale_ue8m0,
+                        scale_num_rows,
+                        scale_stride,
+                        is_column_major,
+                        num_tokens,
+                        rows_per_wg,
+                        moe_layout);
+                    cgh.parallel_for(
+                        sycl::nd_range<1>(vgrid * vblock, vblock), kernel);
+                  });
+                };
+                if (cpt == 4) {
+                  // Unreachable in the asm build; skip the instantiation.
+                  if constexpr (kCptCandidates[0] == 4) {
+                    launch(std::integral_constant<int, 4>{});
+                  }
+                } else if (cpt == 2) {
+                  launch(std::integral_constant<int, 2>{});
+                } else {
+                  launch(std::integral_constant<int, 1>{});
+                }
               });
         });
-    return;
-  }
+    return true;
+  }();
+  if (vec_launched) return;
 
   sycl::range<1> grid(num_blocks);
   sycl::range<1> block(num_threads);
@@ -925,3 +1568,5 @@ void dynamic_per_token_scaled_fp8_quant(
             });
       });
 }
+
+}  // namespace VLLM_QUANT_NS

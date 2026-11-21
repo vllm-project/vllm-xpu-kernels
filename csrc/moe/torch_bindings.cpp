@@ -104,7 +104,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   m.def(
       "reorder_mxfp_scales(Tensor A_scales, Tensor rows_per_expert, "
-      "int total_padded_rows) -> Tensor");
+      "int total_padded_rows, Tensor(a!)? expert_scale_desc=None) -> Tensor");
   m.impl("reorder_mxfp_scales", torch::kXPU, &reorder_mxfp_scales);
 }
 

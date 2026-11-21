@@ -8,7 +8,6 @@ using namespace cute;
 #define IMPL_T ${IMPL_T}
 #define IMPL_KV_T ${IMPL_KV_T}
 #define IMPL_POLICY ${IMPL_POLICY}
-#cmakedefine01 IMPL_FULL_FP8
 #cmakedefine01 IMPL_KISPAGED
 #cmakedefine01 IMPL_KISCAUSAL
 #cmakedefine01 IMPL_KISSINK
@@ -23,8 +22,7 @@ using namespace cute;
       static_cast<bool>(IMPL_KISCAUSAL), \
       static_cast<bool>(IMPL_KISLOCAL),  \
       static_cast<bool>(IMPL_KISSINK),   \
-      static_cast<bool>(IMPL_KISLSE),    \
-      static_cast<bool>(IMPL_FULL_FP8)>( \
+      static_cast<bool>(IMPL_KISLSE)>(   \
       sycl::queue & queue,               \
       CutlassQKType& cuQKType,           \
       const chunk_prefill_args_t& args);

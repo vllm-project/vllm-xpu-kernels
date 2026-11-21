@@ -243,9 +243,10 @@ def build_decode_split_plan(
 
     Inputs
     ------
-    kv_lens         : per-seq KV length in tokens (list or **CPU** tensor).
-                      Device tensors are rejected — D2H sync is unsafe under
-                      XPUGraph capture and is never performed here.
+    kv_lens         : per-seq KV length in tokens (list or tensor).
+                      A device tensor is copied to host on the eager path;
+                      under XPUGraph capture a device tensor is rejected —
+                      D2H sync is unsafe while capturing.
     kv_tile         : KV tile width in tokens (must equal the kernel's
                       get<1>(TileShapeQK{})).
     num_kv_splits   : global cap on per-seq split count (buffer dim).
@@ -273,14 +274,13 @@ def build_decode_split_plan(
       assignment, hard cap}; the kernel never needs to second-guess it.
     """
     if isinstance(kv_lens, torch.Tensor):
-        if kv_lens.device.type != "cpu":
+        if kv_lens.device.type != "cpu" and _is_xpu_capturing():
             raise RuntimeError(
                 "build_decode_split_plan requires host-side kv_lens "
                 f"(CPU tensor or list); got tensor on {kv_lens.device}. "
                 "Pass host_kv_lens on CPU (or a Python list). Device→host "
-                "sync is not performed and is forbidden under XPUGraph "
-                "capture.")
-        kv_lens_list = kv_lens.to(dtype=torch.int32).tolist()
+                "sync is forbidden under XPUGraph capture.")
+        kv_lens_list = kv_lens.to(dtype=torch.int32, device="cpu").tolist()
     else:
         kv_lens_list = [int(v) for v in kv_lens]
 
@@ -536,10 +536,17 @@ def flash_attn_varlen_func(
 
     capturing = _is_xpu_capturing()
     if capturing and out is None:
-        raise RuntimeError(
-            "flash_attn_varlen_func: under XPUGraph capture, pass a "
-            "preallocated `out` tensor so the primary output is not "
-            "allocated inside the captured region.")
+        # Warn instead of raising: existing capture callers (including
+        # upstream's graph-replay tests) capture without a preallocated
+        # `out` and rely on the graph memory pool for the allocation.
+        # Raising here aborted capture mid-region and leaked the capture
+        # state into every later test in the process (the XPU generator
+        # stayed in capturing mode, failing all subsequent randn calls).
+        _logger.warning(
+            "flash_attn_varlen_func: under XPUGraph capture without a "
+            "preallocated `out` tensor; the primary output will be "
+            "allocated inside the captured region. Pass `out` for "
+            "capture-safe allocation.")
 
     if softmax_scale is None:
         softmax_scale = q.shape[-1]**(-0.5)
@@ -574,8 +581,8 @@ def flash_attn_varlen_func(
         # Compute per-seq splits and work_list on host, upload to device.
         # Only enable for decode (max_seqlen_q == 1) with paged KV cache,
         # multi-seq batches, and global num_splits_kv > 1.
-        # host_kv_lens must already be CPU/list (build_decode_split_plan
-        # refuses device tensors — required for XPUGraph capture safety).
+        # build_decode_split_plan refuses device tensors only while
+        # capturing; on the eager path it copies them to host itself.
         splits_per_seq_dev = None
         work_list_dev = None
         if (block_table is not None and host_kv_lens is not None
