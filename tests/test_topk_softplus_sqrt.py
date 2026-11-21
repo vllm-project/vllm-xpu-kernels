@@ -26,6 +26,8 @@ def _torch_topk_softplus_sqrt(
     input_ids: Optional[torch.Tensor] = None,
     hash_indices_table: Optional[torch.Tensor] = None,
     is_padding: Optional[torch.Tensor] = None,
+    bias_vl: Optional[torch.Tensor] = None,
+    image_sentinel_lo: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     scores = F.softplus(gating_output.float()).sqrt()
     original_scores = scores
@@ -33,11 +35,25 @@ def _torch_topk_softplus_sqrt(
     if hash_indices_table is not None:
         assert input_ids is not None
         topk_ids = hash_indices_table[input_ids.long()]
+        if bias_vl is not None and image_sentinel_lo > 0:
+            image_mask = (input_ids.long() >= image_sentinel_lo) & (
+                input_ids.long() < image_sentinel_lo + 5
+            )
+            _, vl_ids = stable_topk(scores + bias_vl.unsqueeze(0), topk, dim=-1)
+            topk_ids = torch.where(
+                image_mask.unsqueeze(-1), vl_ids.to(topk_ids.dtype), topk_ids
+            )
     else:
+        row_bias = torch.zeros_like(scores)
         if e_score_correction_bias is not None:
-            scores_for_choice = scores + e_score_correction_bias.unsqueeze(0)
-        else:
-            scores_for_choice = scores
+            row_bias += e_score_correction_bias.unsqueeze(0)
+        if bias_vl is not None and image_sentinel_lo > 0:
+            assert input_ids is not None
+            image_mask = (input_ids.long() >= image_sentinel_lo) & (
+                input_ids.long() < image_sentinel_lo + 5
+            )
+            row_bias[image_mask] = bias_vl
+        scores_for_choice = scores + row_bias
         _, topk_ids = stable_topk(scores_for_choice, topk, dim=-1)
 
     topk_weights = original_scores.gather(1, topk_ids.long())
@@ -63,6 +79,8 @@ def fused_topk_softplus_sqrt(
     input_ids: Optional[torch.Tensor] = None,
     hash_indices_table: Optional[torch.Tensor] = None,
     is_padding: Optional[torch.Tensor] = None,
+    bias_vl: Optional[torch.Tensor] = None,
+    image_sentinel_lo: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens = gating_output.size(0)
 
@@ -96,9 +114,42 @@ def fused_topk_softplus_sqrt(
         input_ids,
         hash_indices_table,
         is_padding,
+        bias_vl,
+        image_sentinel_lo,
     )
 
     return topk_weights, topk_ids
+
+
+def _make_mixed_input_ids(
+    num_tokens: int,
+    image_sentinel_lo: int,
+    dtype: torch.dtype = torch.int32,
+) -> torch.Tensor:
+    input_ids = torch.randint(
+        0, image_sentinel_lo, (num_tokens,), dtype=torch.int64, device="xpu"
+    )
+    positions = torch.arange(num_tokens, device="xpu")
+    image_rows = positions % 3 == 0
+    input_ids[image_rows] = (
+        image_sentinel_lo + (positions[image_rows] // 3) % 5
+    )
+    input_ids[positions % 6 == 3] = image_sentinel_lo + 5
+    return input_ids.to(dtype)
+
+
+def _assert_topk_matches(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights_ref: torch.Tensor,
+    topk_ids_ref: torch.Tensor,
+) -> None:
+    sorted_ref_ids, idx_ref = topk_ids_ref.sort(dim=-1)
+    sorted_ids, idx_ops = topk_ids.sort(dim=-1)
+    torch.testing.assert_close(sorted_ref_ids, sorted_ids, atol=0, rtol=0)
+    sorted_w_ref = topk_weights_ref.gather(1, idx_ref)
+    sorted_w = topk_weights.gather(1, idx_ops)
+    torch.testing.assert_close(sorted_w_ref, sorted_w, atol=2e-2, rtol=1e-2)
 
 
 def benchmark_fused_topk_softplus_sqrt(
@@ -428,6 +479,115 @@ def test_fused_topk_softplus_sqrt_padding(use_bias: bool, use_hash: bool,
                                test_topk_weights[~is_padding],
                                atol=2e-2,
                                rtol=1e-2)
+
+
+@pytest.mark.parametrize(
+    ("num_experts", "topk", "renormalize", "dtype"),
+    [
+        (128, 6, True, torch.float32),
+        (256, 8, True, torch.bfloat16),
+        (384, 6, False, torch.float16),
+    ],
+)
+def test_fused_topk_softplus_sqrt_bias_vl(
+    num_experts: int,
+    topk: int,
+    renormalize: bool,
+    dtype: torch.dtype,
+):
+    seed_everything(0)
+    num_tokens = 64
+    image_sentinel_lo = 120
+    gating_output = torch.randn(
+        (num_tokens, num_experts), dtype=dtype, device="xpu"
+    )
+    correction_bias = torch.randn(
+        num_experts, dtype=torch.float32, device="xpu"
+    )
+    bias_vl = torch.randn(num_experts, dtype=torch.float32, device="xpu")
+    input_ids = _make_mixed_input_ids(num_tokens, image_sentinel_lo)
+    assert (input_ids == image_sentinel_lo + 5).any()
+
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output,
+        topk,
+        renormalize,
+        1.5,
+        e_score_correction_bias=correction_bias,
+        input_ids=input_ids,
+        bias_vl=bias_vl,
+        image_sentinel_lo=image_sentinel_lo,
+    )
+    topk_weights, topk_ids = fused_topk_softplus_sqrt(
+        gating_output,
+        topk,
+        renormalize,
+        1.5,
+        correction_bias=correction_bias,
+        input_ids=input_ids,
+        bias_vl=bias_vl,
+        image_sentinel_lo=image_sentinel_lo,
+    )
+
+    _assert_topk_matches(topk_weights, topk_ids, topk_weights_ref, topk_ids_ref)
+
+
+@pytest.mark.parametrize(
+    ("num_experts", "topk", "renormalize", "dtype"),
+    [
+        (128, 6, True, torch.float32),
+        (256, 8, False, torch.bfloat16),
+        (384, 6, True, torch.float16),
+    ],
+)
+def test_fused_topk_softplus_sqrt_hash_bias_vl(
+    num_experts: int,
+    topk: int,
+    renormalize: bool,
+    dtype: torch.dtype,
+):
+    seed_everything(0)
+    num_tokens = 64
+    vocab_size = 128
+    image_sentinel_lo = vocab_size - 8
+    gating_output = torch.randn(
+        (num_tokens, num_experts), dtype=dtype, device="xpu"
+    )
+    hash_indices_table = torch.stack(
+        [torch.randperm(num_experts)[:topk] for _ in range(vocab_size)]
+    ).to(device="xpu", dtype=torch.int32)
+    bias_vl = torch.randn(num_experts, dtype=torch.float32, device="xpu")
+    input_ids = _make_mixed_input_ids(num_tokens, image_sentinel_lo)
+    image_rows = (input_ids >= image_sentinel_lo) & (
+        input_ids < image_sentinel_lo + 5
+    )
+    assert image_rows.any() and (~image_rows).any()
+    assert (input_ids == image_sentinel_lo + 5).any()
+
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output,
+        topk,
+        renormalize,
+        2.5,
+        input_ids=input_ids,
+        hash_indices_table=hash_indices_table,
+        bias_vl=bias_vl,
+        image_sentinel_lo=image_sentinel_lo,
+    )
+    topk_weights, topk_ids = fused_topk_softplus_sqrt(
+        gating_output,
+        topk,
+        renormalize,
+        2.5,
+        input_ids=input_ids,
+        hash_indices_table=hash_indices_table,
+        bias_vl=bias_vl,
+        image_sentinel_lo=image_sentinel_lo,
+    )
+
+    _assert_topk_matches(topk_weights, topk_ids, topk_weights_ref, topk_ids_ref)
+    text_ids = hash_indices_table[input_ids[~image_rows].long()]
+    torch.testing.assert_close(topk_ids[~image_rows], text_ids, atol=0, rtol=0)
 
 
 if __name__ == "__main__":

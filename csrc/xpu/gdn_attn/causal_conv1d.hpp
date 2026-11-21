@@ -27,7 +27,7 @@ struct causal_conv1d_kernel {
       const T* conv_weights,
       const T* conv_bias,
       T* conv_states,
-      const int conv_states_stride_0,
+      const ConvStateStrides conv_states_strides,
       T* conv_states_tmp,
       int* query_start_loc,
       int* token_indx,
@@ -56,7 +56,7 @@ struct causal_conv1d_kernel {
         conv_weights(conv_weights),
         conv_bias(conv_bias),
         conv_states(conv_states),
-        conv_states_stride_0(conv_states_stride_0),
+        conv_states_strides(conv_states_strides),
         conv_states_tmp(conv_states_tmp),
         query_start_loc(query_start_loc),
         token_indx(token_indx),
@@ -91,6 +91,15 @@ struct causal_conv1d_kernel {
 
   [[sycl::reqd_sub_group_size(sub_group_size)]] void
   operator()(sycl::nd_item<2> item) const {
+    if (conv_states_strides.elem == 1) {
+      run<true>(item);
+    } else {
+      run<false>(item);
+    }
+  }
+
+  template <bool ElemContig>
+  inline void run(sycl::nd_item<2> item) const {
     const int token_id = item.get_group(0);
     const int local_group_id = item.get_group(1);
     const int local_id = item.get_local_linear_id();
@@ -164,7 +173,7 @@ struct causal_conv1d_kernel {
     // get states cache location
     int states_id = cache_indices[batch_id];
 
-    if (states_id == pad_slot_id) {
+    if (states_id <= pad_slot_id) {
       return;
     }
 
@@ -229,7 +238,8 @@ struct causal_conv1d_kernel {
     const bool has_init_conv_states =
         (has_initial_state == nullptr ||
          (has_initial_state != nullptr && has_initial_state[batch_id]));
-    T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
+    T* conv_states_ptr = conv_states + static_cast<int64_t>(states_id) *
+                                           conv_states_strides.slot;
 
     // load weights
     T local_weights[Width * elems_per_item];
@@ -260,9 +270,9 @@ struct causal_conv1d_kernel {
       for (int i = 0; i < states_load_len; ++i) {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          local_input[Width * e + i] = conv_states_ptr
-              [(Width - 1 - states_load_len + i) * conv_elems +
-               reordered_elems_id + e];
+          local_input[Width * e + i] =
+              conv_states_ptr[conv_states_strides.offset<ElemContig>(
+                  Width - 1 - states_load_len + i, reordered_elems_id + e)];
         }
       }
     }
@@ -321,8 +331,8 @@ struct causal_conv1d_kernel {
       for (int i = 0; i < Width - 1; ++i) {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          conv_states_ptr[i * conv_elems + reordered_elems_id + e] =
-              local_input[Width * e + i + 1];
+          conv_states_ptr[conv_states_strides.offset<ElemContig>(
+              i, reordered_elems_id + e)] = local_input[Width * e + i + 1];
         }
       }
     }
@@ -376,7 +386,7 @@ struct causal_conv1d_kernel {
   const T* conv_weights;
   const T* conv_bias;
   T* conv_states;
-  const int conv_states_stride_0;
+  const ConvStateStrides conv_states_strides;
   T* conv_states_tmp;
   const int32_t* query_start_loc;
   const int* token_indx;
@@ -406,7 +416,7 @@ struct update_states_kernel {
 
   update_states_kernel(
       T* conv_states,
-      const int conv_states_stride_0,
+      const ConvStateStrides conv_states_strides,
       const T* conv_states_tmp,
       const int* cache_indices,
       const int width,
@@ -415,7 +425,7 @@ struct update_states_kernel {
       const int* token_indx,
       const int batch_size)
       : conv_states(conv_states),
-        conv_states_stride_0(conv_states_stride_0),
+        conv_states_strides(conv_states_strides),
         conv_states_tmp(conv_states_tmp),
         cache_indices(cache_indices),
         width(width),
@@ -449,14 +459,15 @@ struct update_states_kernel {
     }
 
     int states_id = cache_indices[batch_id];
-    T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
+    T* conv_states_ptr = conv_states + static_cast<int64_t>(states_id) *
+                                           conv_states_strides.slot;
     const T* conv_states_tmp_ptr =
         conv_states_tmp + batch_id * (width - 1) * conv_elems;
     for (int i = elems_start_offset_group + local_id;
          i < (local_group_id + 1) * elems_per_group;
          i += group_size) {
       if (i < conv_elems) {
-        conv_states_ptr[width_id * conv_elems + i] =
+        conv_states_ptr[conv_states_strides.offset(width_id, i)] =
             conv_states_tmp_ptr[width_id * conv_elems + i];
       }
     }
@@ -464,7 +475,7 @@ struct update_states_kernel {
 
  private:
   T* conv_states;
-  const int conv_states_stride_0;
+  const ConvStateStrides conv_states_strides;
   const T* conv_states_tmp;
   const int* cache_indices;
   const int width;
@@ -477,25 +488,11 @@ struct update_states_kernel {
 // -----------------------------------------------------------------------------
 // Spec-decoding kernel for causal_conv1d.
 //
-// Each spec sequence contributes exactly num_spec_tokens (== num_spec + 1)
-// contiguous tokens in the LOCAL q/k/v/b/a buffers, ordered by
-// spec_query_start_loc; their corresponding GLOBAL positions in
-// mixed_qkvz / mixed_ba / z_out are given by token_indx.
-//
-// Grid: (num_spec_decodes, groups_per_token). Each thread owns a feature
-// chunk of `elems_per_item` lanes and walks all num_spec_tokens tokens of
-// one sequence in a sliding window:
-//   - q/k/v lanes: load Width-1 prior values from
-//     conv_states[cache_indices[batch, num_accepted_tokens[batch] - 1]],
-//     then for every t_local in [0, num_spec_tokens) shift the window left
-//     by one, load the new input from mixed_qkvz[token_indx[...]], apply the
-//     conv (+bias +activation) and store to local q/k/v outputs.
-//   - z lanes: pure reorder, no conv.
-//   - b/a lanes: pure reorder.
-// After processing all tokens we write the trailing Width-1 input values to
-// ONLY the last cache slot: conv_states[cache_indices[batch, num_spec]],
-// matching the Triton fused_recurrent path which keeps a single rollback
-// reference for the next forward.
+// Sliding-window conv state (single cache line, matches CUDA/Triton and vLLM
+// get_conv_copy_spec): the conv state lives in column 0 of the cache_indices
+// row, with state_len = (Width-1) + num_spec rows. The accepted window starts
+// at row num_accepted_tokens-1; after processing, the rolled state (shifted
+// history + the actual draft inputs) is written back to that same line.
 // -----------------------------------------------------------------------------
 template <typename T, int Width, bool ReorderInput>
 struct causal_conv1d_spec_kernel {
@@ -517,7 +514,8 @@ struct causal_conv1d_spec_kernel {
       const T* conv_weights,
       const T* conv_bias,
       T* conv_states,
-      const int conv_states_stride_0,
+      const ConvStateStrides conv_states_strides,
+      const int* query_start_loc,
       const int* token_indx,
       const int* cache_indices,
       const int cache_indices_stride_0,
@@ -543,7 +541,8 @@ struct causal_conv1d_spec_kernel {
         conv_weights(conv_weights),
         conv_bias(conv_bias),
         conv_states(conv_states),
-        conv_states_stride_0(conv_states_stride_0),
+        conv_states_strides(conv_states_strides),
+        query_start_loc(query_start_loc),
         token_indx(token_indx),
         cache_indices(cache_indices),
         cache_indices_stride_0(cache_indices_stride_0),
@@ -575,6 +574,15 @@ struct causal_conv1d_spec_kernel {
 
   [[sycl::reqd_sub_group_size(sub_group_size)]] void
   operator()(sycl::nd_item<2> item) const {
+    if (conv_states_strides.elem == 1) {
+      run<true>(item);
+    } else {
+      run<false>(item);
+    }
+  }
+
+  template <bool ElemContig>
+  inline void run(sycl::nd_item<2> item) const {
     const int batch_id = item.get_group(0);
     const int local_group_id = item.get_group(1);
     const int local_id = item.get_local_linear_id();
@@ -629,9 +637,13 @@ struct causal_conv1d_spec_kernel {
       }
     }
 
+    const int token_start = query_start_loc[batch_id];
+    const int token_end = query_start_loc[batch_id + 1];
+    const int actual_num_tokens = token_end - token_start;
+
     // -- b / a reorder (mixed_ba GLOBAL → b_out/a_out LOCAL) ----------------
-    for (int t_local = 0; t_local < num_spec_tokens; ++t_local) {
-      const int token_id_local = batch_id * num_spec_tokens + t_local;
+    for (int token_id_local = token_start; token_id_local < token_end;
+         ++token_id_local) {
       const int global_t = token_indx[token_id_local];
       if constexpr (ReorderInput) {
         if (qkvz_elems_id < num_v_heads) {
@@ -668,8 +680,8 @@ struct causal_conv1d_spec_kernel {
     if (is_z) {
       int z_elems_id =
           k_heads_id * z_dim + qkvz_dim_id - (q_dim + k_dim + v_dim);
-      for (int t_local = 0; t_local < num_spec_tokens; ++t_local) {
-        const int token_id_local = batch_id * num_spec_tokens + t_local;
+      for (int token_id_local = token_start; token_id_local < token_end;
+           ++token_id_local) {
         const int global_t = token_indx[token_id_local];
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
@@ -685,14 +697,19 @@ struct causal_conv1d_spec_kernel {
     }
 
     // -- conv1d on q/k/v lanes ----------------------------------------------
-    // Pick the initial conv-state slot using num_accepted_tokens. The slot
-    // at column num_accepted_tokens[batch_id] - 1 was written by the previous
-    // step's last accepted token; we fall back to col 0 defensively when
-    // num_accepted_tokens == 0.
-    int init_col = num_accepted_tokens[batch_id] - 1;
-    if (init_col < 0) init_col = 0;
-    const int init_state_id =
-        cache_indices[batch_id * cache_indices_stride_0 + init_col];
+    // Single cache line (column 0); accepted window starts at row init_row.
+    int init_row = num_accepted_tokens[batch_id] - 1;
+    if (init_row < 0) init_row = 0;
+    // Match the effective state length used by the CUDA/Triton path.  The
+    // leading stride may span interleaved states from multiple layers, so it
+    // cannot be used to recover this dimension.
+    const int state_len = Width - 1 + (num_spec_tokens - 1);
+    const int state_id = cache_indices[batch_id * cache_indices_stride_0 + 0];
+    const bool has_conv_state = (state_id > pad_slot_id);
+    T* state_line_ptr = has_conv_state
+                            ? conv_states + static_cast<int64_t>(state_id) *
+                                                conv_states_strides.slot
+                            : nullptr;
 
     // Load weights
     T local_weights[Width * elems_per_item];
@@ -705,29 +722,28 @@ struct causal_conv1d_spec_kernel {
       }
     }
 
-    // Sliding window of size Width. Positions [0, Width-1) start with the
-    // prior conv_state; position Width-1 is filled per-iter with the new
-    // input. When the cache slot is the pad slot the prior is zeroed.
+    // Prime the window from rows [init_row, init_row + Width - 1); the trailing
+    // slot is filled per-iter. Pad slot => zeroed prior.
     T local_input[Width * elems_per_item];
 #pragma unroll
     for (int i = 0; i < Width * elems_per_item; ++i) {
       local_input[i] = static_cast<T>(0);
     }
-    if (Width > 1 && init_state_id != pad_slot_id) {
-      const T* init_state_ptr =
-          conv_states + init_state_id * conv_states_stride_0;
+    if (Width > 1 && has_conv_state) {
 #pragma unroll
       for (int i = 0; i < Width - 1; ++i) {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
           local_input[Width * e + i] =
-              init_state_ptr[i * conv_elems + reordered_elems_id + e];
+              state_line_ptr[conv_states_strides.offset<ElemContig>(
+                  init_row + i, reordered_elems_id + e)];
         }
       }
     }
 
-    for (int t_local = 0; t_local < num_spec_tokens; ++t_local) {
-      const int token_id_local = batch_id * num_spec_tokens + t_local;
+    for (int token_id_local = token_start, t_local = 0;
+         token_id_local < token_end;
+         ++token_id_local, ++t_local) {
       const int global_t = token_indx[token_id_local];
 
       // Shift window left by 1 (for t_local == 0 the trailing slot is fresh).
@@ -801,25 +817,36 @@ struct causal_conv1d_spec_kernel {
                qkvz_dim_id - (q_dim + k_dim) + e] = res[e];
         }
       }
+    }
 
-      // Checkpoint the rolling conv state at every step into the cache slot
-      // that the next decoding round will read when `num_accepted_tokens ==
-      // t_local + 1`. Writing each column (not only the last one) keeps the
-      // scheduler's per-acceptance rollback consistent: column `t_local`
-      // holds the conv state right after consuming spec token `t_local`.
-      if (Width > 1) {
-        const int save_state_id =
-            cache_indices[batch_id * cache_indices_stride_0 + t_local];
-        if (save_state_id != pad_slot_id) {
-          T* save_state_ptr =
-              conv_states + save_state_id * conv_states_stride_0;
+    // Roll the logical line back to column 0: rows [0, hist_rows) = shifted
+    // history from row init_row+1, followed by the actual compact draft
+    // inputs. Rows beyond logical_state_len are unused capacity for this
+    // ragged forward and must remain unchanged.
+    // In-place left shift is safe since src row (init_row+1+j) >= dst row j.
+    if (Width > 1 && has_conv_state) {
+      const int logical_state_len =
+          state_len - (num_spec_tokens - actual_num_tokens);
+      const int hist_rows = logical_state_len - actual_num_tokens;
+      for (int j = 0; j < logical_state_len; ++j) {
+        if (j < hist_rows) {
+          const int src_row = init_row + 1 + j;
 #pragma unroll
-          for (int i = 0; i < Width - 1; ++i) {
+          for (int e = 0; e < elems_per_item; ++e) {
+            state_line_ptr[conv_states_strides.offset<ElemContig>(
+                j, reordered_elems_id + e)] =
+                state_line_ptr[conv_states_strides.offset<ElemContig>(
+                    src_row, reordered_elems_id + e)];
+          }
+        } else {
+          const int draft_t = j - hist_rows;
+          const int token_id_local = token_start + draft_t;
+          const int global_t = token_indx[token_id_local];
 #pragma unroll
-            for (int e = 0; e < elems_per_item; ++e) {
-              save_state_ptr[i * conv_elems + reordered_elems_id + e] =
-                  local_input[Width * e + i + 1];
-            }
+          for (int e = 0; e < elems_per_item; ++e) {
+            state_line_ptr[conv_states_strides.offset<ElemContig>(
+                j, reordered_elems_id + e)] =
+                mixed_qkvz[global_t * qkvz_elems + mixed_qkvz_id + e];
           }
         }
       }
@@ -838,7 +865,8 @@ struct causal_conv1d_spec_kernel {
   const T* conv_weights;
   const T* conv_bias;
   T* conv_states;
-  const int conv_states_stride_0;
+  const ConvStateStrides conv_states_strides;
+  const int* query_start_loc;
   const int* token_indx;
   const int* cache_indices;
   const int cache_indices_stride_0;
@@ -869,7 +897,7 @@ void kernel_launcher(
     const T* conv_weights,
     const T* conv_bias,
     T* conv_states,
-    const int conv_states_stride_0,
+    const ConvStateStrides conv_states_strides,
     T* conv_states_tmp,
     int* query_start_loc,
     int* token_indx,
@@ -912,7 +940,8 @@ void kernel_launcher(
           conv_weights,
           conv_bias,
           conv_states,
-          conv_states_stride_0,
+          conv_states_strides,
+          query_start_loc,
           token_indx,
           cache_indices,
           cache_indices_stride_0,
@@ -949,7 +978,7 @@ void kernel_launcher(
         conv_weights,
         conv_bias,
         conv_states,
-        conv_states_stride_0,
+        conv_states_strides,
         conv_states_tmp,
         query_start_loc,
         token_indx,
@@ -976,7 +1005,7 @@ void kernel_launcher(
     queue.submit([&](sycl::handler& cgh) {
       KERNEL_UPDATE task(
           conv_states,
-          conv_states_stride_0,
+          conv_states_strides,
           conv_states_tmp,
           cache_indices,
           Width,
@@ -1008,9 +1037,11 @@ void causal_conv1d(
     const std::optional<torch::Tensor>&
         conv_bias,  // [num_k_heads * (2 * head_k_dim + head_v_dim * num_v_heads
                     // / num_k_heads)] or None
-    torch::Tensor&
-        conv_states,  // [cache_batch_size, width - 1, num_k_heads * (2 *
-                      // head_k_dim + head_v_dim * num_v_heads / num_k_heads)]
+    torch::Tensor& conv_states,  // SD [cache_batch_size, state_len, conv_elems]
+                                 // or DS [cache_batch_size, conv_elems,
+                                 // state_len], with state_len >= width - 1 and
+                                 // conv_elems = num_k_heads * (2 * head_k_dim +
+                                 // head_v_dim * num_v_heads / num_k_heads)
     const std::optional<torch::Tensor>& query_start_loc,  // [batch_size + 1]
     const std::optional<torch::Tensor>&
         token_indx,  // [num_virtual_tokens] or None
@@ -1038,7 +1069,8 @@ void causal_conv1d(
   const int qkvz_elems = mixed_qkvz.size(1);
   const int conv_elems = conv_weights.size(0);
   const int width = conv_weights.size(1);
-  const int conv_states_stride_0 = conv_states.stride(0);
+  const ConvStateStrides conv_states_strides =
+      get_conv_state_strides(conv_states, conv_elems, width);
 
   int num_spec_tokens = 0;
   int cache_indices_stride_0 = 0;
@@ -1072,7 +1104,7 @@ void causal_conv1d(
           ? reinterpret_cast<scalar_t*>(conv_bias->data_ptr())                \
           : nullptr,                                                          \
       reinterpret_cast<scalar_t*>(conv_states.data_ptr()),                    \
-      conv_states_stride_0,                                                   \
+      conv_states_strides,                                                    \
       reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),                \
       reinterpret_cast<int*>(query_start_loc->data_ptr()),                    \
       token_indx.has_value() ? reinterpret_cast<int*>(token_indx->data_ptr()) \

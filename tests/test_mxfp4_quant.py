@@ -140,3 +140,32 @@ def test_mxfp4_known_values() -> None:
                                    ops_out.cpu().view(torch.uint8),
                                    atol=0.2,
                                    rtol=0.2)
+
+
+# Rows that are not a multiple of the group size take the scalar kernel, whose
+# groups straddle rows. Its output must match the vectorised path run on the
+# same data viewed as [-1, 32].
+@pytest.mark.parametrize("shape", [(2, 48), (4, 40), (2, 80), (8, 100)])
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@torch.inference_mode()
+def test_mxfp4_quant_scalar_path(shape: tuple[int, int],
+                                 dtype: torch.dtype) -> None:
+    seed_everything(0)
+    x = torch.randn(shape, dtype=dtype, device="xpu") * 4
+    num_groups = x.numel() // MXFP4_GROUP_SIZE
+
+    out_q = torch.empty(x.numel() // 2, device="xpu", dtype=torch.uint8)
+    out_s = torch.empty(1, num_groups, device="xpu", dtype=torch.float32)
+    torch.ops._C.per_token_group_quant_mxfp4(x, out_q, out_s,
+                                             MXFP4_GROUP_SIZE, 1e-10)
+
+    ref_q, ref_s = per_token_group_quant_mxfp4(
+        x.reshape(-1, MXFP4_GROUP_SIZE), group_size=MXFP4_GROUP_SIZE)
+    torch.testing.assert_close(out_s.reshape(-1).cpu(),
+                               ref_s.float().reshape(-1).cpu(),
+                               atol=0,
+                               rtol=0)
+    torch.testing.assert_close(out_q.cpu(),
+                               ref_q.view(torch.uint8).reshape(-1).cpu(),
+                               atol=0,
+                               rtol=0)

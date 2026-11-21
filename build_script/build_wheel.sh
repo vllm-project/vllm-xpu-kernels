@@ -4,12 +4,11 @@
 # Build vllm-xpu-kernels wheel inside a Docker container and copy it to the host.
 #
 # Usage:
-#   ./build_wheel.sh [--output-dir <dir>] [--image-name <name>] [--gpu-profile <name>] [--no-cache]
+#   ./build_wheel.sh [--output-dir <dir>] [--image-name <name>] [--no-cache]
 #
 # Options:
 #   --output-dir     Directory on host to store the built wheel (default: ./dist)
 #   --image-name     Docker image name/tag (default: vllm-xpu-kernels-builder)
-#   --gpu-profile    GPU runtime profile name from gpu_runtime_packages.json (default: default)
 #   --version        Set wheel version via VLLM_VERSION_OVERRIDE (default: auto from setuptools-scm)
 #   --no-cache       Build Docker image without cache
 #
@@ -25,7 +24,6 @@ OUTPUT_DIR="${SCRIPT_DIR}/dist"
 IMAGE_NAME="vllm-xpu-kernels-builder"
 CONTAINER_NAME="vllm-xpu-wheel-build-$$"
 DOCKER_NO_CACHE=""
-GPU_RUNTIME_PROFILE="default"
 VLLM_VERSION_OVERRIDE=""
 
 # ─── Parse arguments ───────────────────────────────────────────────────────
@@ -35,8 +33,6 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"; shift 2 ;;
         --image-name)
             IMAGE_NAME="$2"; shift 2 ;;
-        --gpu-profile)
-            GPU_RUNTIME_PROFILE="$2"; shift 2 ;;
         --version)
             VLLM_VERSION_OVERRIDE="$2"; shift 2 ;;
         --no-cache)
@@ -53,9 +49,9 @@ echo "=========================================="
 echo " Step 1/3: Building Docker image '${IMAGE_NAME}'"
 echo "=========================================="
 
-BUILD_ARGS="--build-arg GPU_RUNTIME_PROFILE=${GPU_RUNTIME_PROFILE}"
+BUILD_ARGS=""
 if [ -n "${VLLM_VERSION_OVERRIDE}" ]; then
-    BUILD_ARGS="${BUILD_ARGS} --build-arg VLLM_VERSION_OVERRIDE=${VLLM_VERSION_OVERRIDE}"
+    BUILD_ARGS="--build-arg VLLM_VERSION_OVERRIDE=${VLLM_VERSION_OVERRIDE}"
     echo "  Version override: ${VLLM_VERSION_OVERRIDE}"
 fi
 

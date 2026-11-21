@@ -267,6 +267,38 @@ def test_dynamic_per_tensor_fp8_quant(
                                ops_out.to(dtype=torch.float32))
 
 
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_dynamic_per_tensor_fp8_quant_scale_exact(
+    fp8_dtype: torch.dtype,
+    dtype: torch.dtype,
+    seed: int,
+) -> None:
+    seed_everything(seed)
+    fp8_max = torch.tensor(torch.finfo(fp8_dtype).max, dtype=torch.float32)
+
+    # Vary the magnitude so that absmax / fp8_max covers many different values.
+    for magnitude in torch.rand(64) * 100 + 0.01:
+        x = (torch.rand(8, 256, device="xpu") * magnitude).to(dtype)
+        _, ops_scale = scaled_fp8_quant(x, fp8_dtype=fp8_dtype)
+        # Divide on the CPU: the scale must equal the IEEE absmax / fp8_max.
+        ref_scale = x.abs().max().float().cpu() / fp8_max
+        assert torch.equal(ops_scale.cpu().view(()), ref_scale)
+
+
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES)
+@torch.inference_mode()
+def test_dynamic_per_tensor_fp8_quant_scale_inf(
+    fp8_dtype: torch.dtype,
+) -> None:
+    x = torch.rand(8, 256, device="xpu")
+    x[0, 0] = float("inf")
+    _, ops_scale = scaled_fp8_quant(x, fp8_dtype=fp8_dtype)
+    assert torch.isinf(ops_scale).all()
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -352,6 +384,46 @@ def test_per_block_fp8_quant(
         if tma_aligned_scale:
             assert ops_scales.stride()[-1] == get_tma_aligned_size(
                 num_tokens_block_quant, 4)
+
+
+# Regression test: groups wider than one 32-lane sub-group in the vectorized
+# kernel (e.g. fp32 group 256 at one chunk per lane needs 64 lanes) must still
+# reduce across the whole group. 8192 tokens saturates the device.
+@pytest.mark.parametrize("num_tokens", [3, 8192])
+@pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
+@pytest.mark.parametrize("group_size", [256, 512])
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES)
+@torch.inference_mode()
+def test_per_token_group_quant_fp8_wide_group(num_tokens: int,
+                                              dtype: torch.dtype,
+                                              group_size: int,
+                                              fp8_dtype: torch.dtype) -> None:
+    seed_everything(0)
+    hidden = 1024
+    x = torch.randn(num_tokens, hidden, dtype=dtype, device="xpu") * 4
+    # Put each group's absmax in its last element so a partial reduction
+    # gives a wrong scale.
+    x.view(num_tokens, -1, group_size)[..., -1] = 64.0
+
+    fp8_max = torch.finfo(fp8_dtype).max
+    xg = x.float().view(num_tokens, -1, group_size)
+    ref_scales = (xg.abs().amax(dim=-1).clamp(min=1e-10) / fp8_max)
+    ref_out = (xg / ref_scales.unsqueeze(-1)).clamp(
+        -fp8_max, fp8_max).to(fp8_dtype).view(num_tokens, hidden)
+
+    ops_out, ops_scales = per_token_group_quant_fp8(x,
+                                                    group_size=group_size,
+                                                    dtype=fp8_dtype,
+                                                    use_ue8m0=False)
+
+    torch.testing.assert_close(ops_scales.float(),
+                               ref_scales,
+                               atol=0,
+                               rtol=1e-5)
+    # fp32 -> e5m2 may round a few ties differently from torch.
+    assert_close_percentage(ops_out.float(),
+                            ref_out.float(),
+                            mismatch_threshold=0.01)
 
 
 @pytest.mark.parametrize("num_tokens_block_quant", NUM_TOKENS_BLOCK_QUANT)
@@ -508,6 +580,38 @@ def test_static_fp8_quant_1d_scale(
                                ops_out.float(),
                                rtol=0.12,
                                atol=0.0)
+
+
+@pytest.mark.parametrize("num_tokens, hidden_size", [(1, 32), (64, 2560)])
+@pytest.mark.parametrize("column_major", [False, True])
+@torch.inference_mode()
+def test_per_token_group_quant_mxfp8_e8m0_scales(num_tokens: int,
+                                                 hidden_size: int,
+                                                 column_major: bool) -> None:
+    torch.manual_seed(0)
+    x = torch.randn(num_tokens,
+                    hidden_size,
+                    dtype=torch.bfloat16,
+                    device="xpu")
+
+    def run(scale_dtype):
+        q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
+        shape = (num_tokens, hidden_size // 32)
+        if column_major:
+            s = torch.empty(shape[::-1],
+                            dtype=scale_dtype,
+                            device="xpu").t()
+        else:
+            s = torch.empty(shape, dtype=scale_dtype, device="xpu")
+        torch.ops._C.per_token_group_fp8_quant(x, q, s, 32, 1e-10, -448.0,
+                                               448.0, True, False, False)
+        return q, s
+
+    ref_q, ref_s = run(torch.float32)
+    q, s = run(torch.float8_e8m0fnu)
+    assert torch.equal(q.view(torch.uint8), ref_q.view(torch.uint8))
+    assert torch.equal(s.view(torch.uint8),
+                       ref_s.to(torch.float8_e8m0fnu).view(torch.uint8))
 
 
 if __name__ == "__main__":

@@ -37,25 +37,29 @@ def per_token_group_quant_mxfp4(
     # Packed FP4 output: two nibbles per byte
     out_q = torch.empty(M, N // 2, device=x.device, dtype=torch.uint8)
 
-    # Scale tensor – row-major or column-major
+    # Scale tensor - row-major or col-major. 16-bit inputs write e8m0 scales
+    # directly; float32 inputs write to a float32 buffer, then cast to e8m0.
+    scale_dtype = (torch.float32
+                   if x.dtype == torch.float32 else torch.float8_e8m0fnu)
     if column_major_scales:
         # Allocate (N//group_size, M), then permute to (M, N//group_size).
         # The underlying storage is column-major: stride(0)=1, stride(1)=M.
         shape = (N // group_size, M)
         out_s = torch.empty(shape, device=x.device,
-                            dtype=torch.float32).permute(-1, -2)
+                            dtype=scale_dtype).permute(-1, -2)
     else:
         out_s = torch.empty(M,
                             N // group_size,
                             device=x.device,
-                            dtype=torch.float32)
+                            dtype=scale_dtype)
 
     torch.ops._C.per_token_group_quant_mxfp4(x.contiguous(), out_q, out_s,
                                              group_size, eps)
 
     out_q = out_q.view(torch.float4_e2m1fn_x2)
-    out_s = out_s.to(dtype=torch.float8_e8m0fnu,
-                     memory_format=torch.preserve_format)
+    if out_s.dtype != torch.float8_e8m0fnu:
+        out_s = out_s.to(dtype=torch.float8_e8m0fnu,
+                         memory_format=torch.preserve_format)
     if column_major_scales:
         # Verify that the column-major-like strides are preserved after casting.
         assert out_s.stride(0) == 1 and out_s.stride(1) == M, (

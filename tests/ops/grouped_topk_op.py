@@ -28,10 +28,20 @@ def grouped_topk(
 
     assert hidden_states.size(0) == gating_output.size(0), (
         "Number of tokens mismatch")
+    # The fused kernel always performs its scoring, bias add and top-k
+    # selection in fp32 (it casts the raw inputs to float internally). To be a
+    # faithful oracle we must do the same, otherwise low-precision (bf16/half)
+    # ties at the top-k boundary are broken differently and the expert ids
+    # diverge even though both selections are "correct".
     if scoring_func == "softmax":
-        scores = torch.softmax(gating_output, dim=-1)
+        # The fused path pre-applies softmax in the input dtype before handing
+        # the scores to the kernel (SCORING_NONE), so replicate that here and
+        # then upcast for the fp32 selection the kernel performs.
+        scores = torch.softmax(gating_output, dim=-1).float()
     elif scoring_func == "sigmoid":
-        scores = torch.sigmoid(gating_output)
+        # The kernel receives the raw gating output and applies sigmoid in
+        # fp32 (SCORING_SIGMOID).
+        scores = torch.sigmoid(gating_output.float())
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
     num_token = scores.size(0)
@@ -39,7 +49,7 @@ def grouped_topk(
         # Store original scores before applying correction bias. We use biased
         # scores for expert selection but original scores for routing weights.
         original_scores = scores
-        scores = scores + e_score_correction_bias.unsqueeze(0)
+        scores = scores + e_score_correction_bias.float().unsqueeze(0)
         group_scores = (stable_topk(
             scores.view(num_token, num_expert_group, -1), 2,
             dim=-1)[0].sum(dim=-1))

@@ -12,6 +12,7 @@
 
 #include <type_traits>
 
+namespace vllm::xpu::xe2 {
 // Base trait: all policies disabled by default
 template <typename Policy>
 struct is_chunk_policy_enabled : std::false_type {};
@@ -25,3 +26,5 @@ struct is_chunk_policy_tuple_enabled : std::false_type {};
 
 // Specializations for enabled policy+bool tuples:
 @CHUNK_ENABLED_TUPLE_TRAITS@
+
+}  // namespace vllm::xpu::xe2

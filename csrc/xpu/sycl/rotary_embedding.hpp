@@ -15,8 +15,15 @@
 #pragma once
 
 #include <sycl/sycl.hpp>
+#include <type_traits>
 
 namespace vllm {
+
+template <typename scalar_t>
+using rotary_acc_t = std::conditional_t<
+    std::is_same_v<scalar_t, sycl::ext::oneapi::bfloat16>,
+    float,
+    scalar_t>;
 
 // ── Element-level rotation ──────────────────────────────────────────────────
 // Applies the rotary embedding to a single (rot_offset) pair of elements.
@@ -36,13 +43,13 @@ inline void apply_token_rotary_embedding(
     // GPT-NeoX style: x and y are separated by embed_dim.
     const int x_index = rot_offset;
     const int y_index = embed_dim + rot_offset;
-    const scalar_t cos = cos_ptr[x_index];
-    const scalar_t sin = sin_ptr[x_index];
-
-    const scalar_t x = input[x_index];
-    const scalar_t y = input[y_index];
-    output[x_index] = x * cos - y * sin;
-    output[y_index] = y * cos + x * sin;
+    using acc_t = rotary_acc_t<scalar_t>;
+    const acc_t cos = static_cast<acc_t>(cos_ptr[x_index]);
+    const acc_t sin = static_cast<acc_t>(sin_ptr[x_index]);
+    const acc_t x = static_cast<acc_t>(input[x_index]);
+    const acc_t y = static_cast<acc_t>(input[y_index]);
+    output[x_index] = static_cast<scalar_t>(x * cos - y * sin);
+    output[y_index] = static_cast<scalar_t>(y * cos + x * sin);
   } else {
     // GPT-J style: interleaved [x0, y0, x1, y1, ...].
     // Use vec2 to load/rotate/store a pair in one shot.
@@ -50,13 +57,16 @@ inline void apply_token_rotary_embedding(
     const auto* input_v2 = reinterpret_cast<const v2_type*>(input);
     auto* output_v2 = reinterpret_cast<v2_type*>(output);
 
-    const scalar_t c = cos_ptr[rot_offset];
-    const scalar_t s = sin_ptr[rot_offset];
-    const v2_type c2 = {c, c};
-    const v2_type s2 = {s, s};
     const v2_type t = input_v2[rot_offset];
-    const v2_type tr = {-t[1], t[0]};
-    output_v2[rot_offset] = t * c2 + tr * s2;
+    using acc_t = rotary_acc_t<scalar_t>;
+    const acc_t c = static_cast<acc_t>(cos_ptr[rot_offset]);
+    const acc_t s = static_cast<acc_t>(sin_ptr[rot_offset]);
+    output_v2[rot_offset] = {
+        static_cast<scalar_t>(
+            static_cast<acc_t>(t[0]) * c - static_cast<acc_t>(t[1]) * s),
+        static_cast<scalar_t>(
+            static_cast<acc_t>(t[1]) * c + static_cast<acc_t>(t[0]) * s),
+    };
   }
 }
 
@@ -83,8 +93,23 @@ inline void apply_token_rotary_embedding_vec(
   vec_t cos_v = *reinterpret_cast<const vec_t*>(cos_ptr + rot_offset);
   vec_t sin_v = *reinterpret_cast<const vec_t*>(sin_ptr + rot_offset);
 
-  *reinterpret_cast<vec_t*>(output + x_index) = x * cos_v - y * sin_v;
-  *reinterpret_cast<vec_t*>(output + y_index) = y * cos_v + x * sin_v;
+  if constexpr (std::is_same_v<scalar_t, sycl::ext::oneapi::bfloat16>) {
+    vec_t rotated_x;
+    vec_t rotated_y;
+    for (int i = 0; i < VEC_SIZE; ++i) {
+      const float x_value = static_cast<float>(x[i]);
+      const float y_value = static_cast<float>(y[i]);
+      const float cos_value = static_cast<float>(cos_v[i]);
+      const float sin_value = static_cast<float>(sin_v[i]);
+      rotated_x[i] = x_value * cos_value - y_value * sin_value;
+      rotated_y[i] = y_value * cos_value + x_value * sin_value;
+    }
+    *reinterpret_cast<vec_t*>(output + x_index) = rotated_x;
+    *reinterpret_cast<vec_t*>(output + y_index) = rotated_y;
+  } else {
+    *reinterpret_cast<vec_t*>(output + x_index) = x * cos_v - y * sin_v;
+    *reinterpret_cast<vec_t*>(output + y_index) = y * cos_v + x * sin_v;
+  }
 }
 
 // ── Vectorized GPT-J rotation (vec4, 2 pairs per call) ──────────────────────
@@ -113,15 +138,26 @@ inline void apply_token_rotary_embedding_gptj_vec4(
   vec2_t cs = *reinterpret_cast<const vec2_t*>(cos_ptr + rot_offset);
   vec2_t ss = *reinterpret_cast<const vec2_t*>(sin_ptr + rot_offset);
 
-  // Expand to vec4: {c0, c0, c1, c1}, {s0, s0, s1, s1}
-  vec4_t c4 = {cs[0], cs[0], cs[1], cs[1]};
-  vec4_t s4 = {ss[0], ss[0], ss[1], ss[1]};
-
-  // Swizzle: {x0, y0, x1, y1} → {-y0, x0, -y1, x1}
-  vec4_t vr = {-v[1], v[0], -v[3], v[2]};
-
-  // Rotation: output = v * cos + vr * sin
-  *reinterpret_cast<vec4_t*>(output + rot_offset * 2) = v * c4 + vr * s4;
+  if constexpr (std::is_same_v<scalar_t, sycl::ext::oneapi::bfloat16>) {
+    vec4_t rotated;
+    for (int i = 0; i < 2; ++i) {
+      const float x_value = static_cast<float>(v[2 * i]);
+      const float y_value = static_cast<float>(v[2 * i + 1]);
+      const float cos_value = static_cast<float>(cs[i]);
+      const float sin_value = static_cast<float>(ss[i]);
+      rotated[2 * i] = x_value * cos_value - y_value * sin_value;
+      rotated[2 * i + 1] = y_value * cos_value + x_value * sin_value;
+    }
+    *reinterpret_cast<vec4_t*>(output + rot_offset * 2) = rotated;
+  } else {
+    // Expand to vec4: {c0, c0, c1, c1}, {s0, s0, s1, s1}
+    vec4_t c4 = {cs[0], cs[0], cs[1], cs[1]};
+    vec4_t s4 = {ss[0], ss[0], ss[1], ss[1]};
+    // Swizzle: {x0, y0, x1, y1} → {-y0, x0, -y1, x1}
+    vec4_t vr = {-v[1], v[0], -v[3], v[2]};
+    // Rotation: output = v * cos + vr * sin
+    *reinterpret_cast<vec4_t*>(output + rot_offset * 2) = v * c4 + vr * s4;
+  }
 }
 
 }  // namespace vllm

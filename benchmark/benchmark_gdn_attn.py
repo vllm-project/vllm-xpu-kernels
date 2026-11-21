@@ -261,7 +261,9 @@ def _make_spec_inputs(shape: GdnShape, workload: Workload, dtype):
     projected_states_ba = torch.randn(
         (num_actual_tokens, mixed_ba_size), dtype=dtype, device=DEVICE)
     conv_state = torch.randn(
-        (cache_batch_size, width - 1, mixed_qkv_size),
+        (cache_batch_size,
+         width - 1 + num_spec_tokens,
+         mixed_qkv_size),
         dtype=dtype, device=DEVICE)
     ssm_state = torch.randn(
         (cache_batch_size, num_v_heads // tp_size, head_v_dim, head_k_dim),
@@ -356,6 +358,7 @@ def estimate_bytes_moved(kwargs):
     ba_per_tok = nk * (2 * nv // nk)
     qkv_per_tok = nk * (2 * hk + hv * nv // nk)
     out_per_tok = nv * hv
+    conv_state_len = kwargs["conv_state"].shape[1]
 
     batch = max(1,
                 kwargs["num_prefills"] + kwargs["num_decodes"]
@@ -363,7 +366,7 @@ def estimate_bytes_moved(kwargs):
 
     bytes_in = n_tok * (qkvz_per_tok + ba_per_tok) * bpe_in
     bytes_out = n_tok * (out_per_tok * 2) * bpe_out     # core_attn_out + z
-    bytes_conv_state = batch * (width - 1) * qkv_per_tok * bpe_in * 2  # RW
+    bytes_conv_state = batch * conv_state_len * qkv_per_tok * bpe_in * 2
     bytes_ssm_state = batch * nv * hk * hv * bpe_ssm * 2              # RW
     bytes_weights = qkv_per_tok * width * bpe_in + qkv_per_tok * bpe_in
 
@@ -413,55 +416,90 @@ def benchmark_gdn(shape_name, workload_name, dtype_str, provider, iterations):
     kwargs = make_inputs(shape, workload, dtype)
 
     def _run():
-        intermediates = torch.ops._xpu_C.causal_conv1d(
-            kwargs["z"],
-            kwargs["projected_states_qkvz"],
-            kwargs["projected_states_ba"],
-            kwargs["num_k_heads"],
-            kwargs["num_v_heads"],
-            kwargs["head_k_dim"],
-            kwargs["head_v_dim"],
-            conv_state=kwargs["conv_state"],
-            conv_weights=kwargs["conv_weights"],
-            conv_bias=kwargs["conv_bias"],
-            activation=kwargs["activation"],
-            num_prefills=kwargs["num_prefills"],
-            num_decodes=kwargs["num_decodes"],
-            num_spec_decodes=kwargs["num_spec_decodes"],
-            has_initial_state=kwargs["has_initial_state"],
-            non_spec_query_start_loc=kwargs["non_spec_query_start_loc"],
-            non_spec_token_indx=kwargs["non_spec_token_indx"],
-            non_spec_state_indices_tensor=kwargs[
-                "non_spec_state_indices_tensor"],
-            spec_query_start_loc=kwargs["spec_query_start_loc"],
-            spec_token_indx=kwargs["spec_token_indx"],
-            spec_state_indices_tensor=kwargs["spec_state_indices_tensor"],
-            num_accepted_tokens=kwargs["num_accepted_tokens"],
-            num_actual_tokens=kwargs["num_actual_tokens"],
-            tp_size=kwargs["tp_size"],
-            reorder_input=kwargs["reorder_input"])
-        torch.ops._xpu_C.gated_delta_rule(
-            kwargs["core_attn_out"],
-            *intermediates,
-            kwargs["num_v_heads"],
-            kwargs["head_v_dim"],
-            A_log=kwargs["A_log"],
-            dt_bias=kwargs["dt_bias"],
-            ssm_state=kwargs["ssm_state"],
-            num_prefills=kwargs["num_prefills"],
-            num_decodes=kwargs["num_decodes"],
-            num_spec_decodes=kwargs["num_spec_decodes"],
-            has_initial_state=kwargs["has_initial_state"],
-            non_spec_query_start_loc=kwargs["non_spec_query_start_loc"],
-            non_spec_token_indx=kwargs["non_spec_token_indx"],
-            non_spec_state_indices_tensor=kwargs[
-                "non_spec_state_indices_tensor"],
-            spec_query_start_loc=kwargs["spec_query_start_loc"],
-            spec_token_indx=kwargs["spec_token_indx"],
-            spec_state_indices_tensor=kwargs["spec_state_indices_tensor"],
-            num_accepted_tokens=kwargs["num_accepted_tokens"],
-            num_actual_tokens=kwargs["num_actual_tokens"],
-            tp_size=kwargs["tp_size"])
+        # Both stages are split into spec/non-spec ops. Dispatch the whole
+        # conv->delta pipeline based on whether this is a spec-decode workload.
+        if kwargs["num_spec_decodes"] > 0:
+            intermediates = torch.ops._xpu_C.causal_conv1d_spec(
+                kwargs["z"],
+                kwargs["projected_states_qkvz"],
+                kwargs["projected_states_ba"],
+                kwargs["num_k_heads"],
+                kwargs["num_v_heads"],
+                kwargs["head_k_dim"],
+                kwargs["head_v_dim"],
+                conv_state=kwargs["conv_state"],
+                conv_weights=kwargs["conv_weights"],
+                conv_bias=kwargs["conv_bias"],
+                activation=kwargs["activation"],
+                num_prefills=kwargs["num_prefills"],
+                num_decodes=kwargs["num_decodes"],
+                num_spec_decodes=kwargs["num_spec_decodes"],
+                spec_query_start_loc=kwargs["spec_query_start_loc"],
+                spec_token_indx=kwargs["spec_token_indx"],
+                spec_state_indices_tensor=kwargs["spec_state_indices_tensor"],
+                num_accepted_tokens=kwargs["num_accepted_tokens"],
+                num_actual_tokens=kwargs["num_actual_tokens"],
+                tp_size=kwargs["tp_size"],
+                reorder_input=kwargs["reorder_input"])
+            torch.ops._xpu_C.gated_delta_rule_spec(
+                kwargs["core_attn_out"],
+                *intermediates,
+                kwargs["num_v_heads"],
+                kwargs["head_v_dim"],
+                A_log=kwargs["A_log"],
+                dt_bias=kwargs["dt_bias"],
+                ssm_state=kwargs["ssm_state"],
+                num_prefills=kwargs["num_prefills"],
+                num_decodes=kwargs["num_decodes"],
+                num_spec_decodes=kwargs["num_spec_decodes"],
+                spec_query_start_loc=kwargs["spec_query_start_loc"],
+                spec_token_indx=kwargs["spec_token_indx"],
+                spec_state_indices_tensor=kwargs["spec_state_indices_tensor"],
+                num_accepted_tokens=kwargs["num_accepted_tokens"],
+                num_actual_tokens=kwargs["num_actual_tokens"],
+                tp_size=kwargs["tp_size"])
+        else:
+            intermediates = torch.ops._xpu_C.causal_conv1d_non_spec(
+                kwargs["z"],
+                kwargs["projected_states_qkvz"],
+                kwargs["projected_states_ba"],
+                kwargs["num_k_heads"],
+                kwargs["num_v_heads"],
+                kwargs["head_k_dim"],
+                kwargs["head_v_dim"],
+                conv_state=kwargs["conv_state"],
+                conv_weights=kwargs["conv_weights"],
+                conv_bias=kwargs["conv_bias"],
+                activation=kwargs["activation"],
+                num_prefills=kwargs["num_prefills"],
+                num_decodes=kwargs["num_decodes"],
+                num_spec_decodes=kwargs["num_spec_decodes"],
+                has_initial_state=kwargs["has_initial_state"],
+                non_spec_query_start_loc=kwargs["non_spec_query_start_loc"],
+                non_spec_token_indx=kwargs["non_spec_token_indx"],
+                non_spec_state_indices_tensor=kwargs[
+                    "non_spec_state_indices_tensor"],
+                num_actual_tokens=kwargs["num_actual_tokens"],
+                tp_size=kwargs["tp_size"],
+                reorder_input=kwargs["reorder_input"])
+            torch.ops._xpu_C.gated_delta_rule_non_spec(
+                kwargs["core_attn_out"],
+                *intermediates,
+                kwargs["num_v_heads"],
+                kwargs["head_v_dim"],
+                A_log=kwargs["A_log"],
+                dt_bias=kwargs["dt_bias"],
+                ssm_state=kwargs["ssm_state"],
+                num_prefills=kwargs["num_prefills"],
+                num_decodes=kwargs["num_decodes"],
+                num_spec_decodes=kwargs["num_spec_decodes"],
+                has_initial_state=kwargs["has_initial_state"],
+                non_spec_query_start_loc=kwargs["non_spec_query_start_loc"],
+                non_spec_token_indx=kwargs["non_spec_token_indx"],
+                non_spec_state_indices_tensor=kwargs[
+                    "non_spec_state_indices_tensor"],
+                num_actual_tokens=kwargs["num_actual_tokens"],
+                tp_size=kwargs["tp_size"])
 
     # warmup
     for _ in range(WARMUP):
