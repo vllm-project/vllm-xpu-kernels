@@ -613,19 +613,22 @@ def flash_attn_varlen_func(
                 work_list_dev = work_list_cpu.to(
                     device=q.device, non_blocking=True)
 
+        use_spec_decode = False
         try:
             # Speculative-decoding fast path: redirect small, causal,
             # paged query batches to the split-K decode kernel. See the
             # comment on _SPEC_DECODE_MAX_QLEN above for the rationale.
             batch = cu_seqlens_q.numel() - 1
             # TODO: We could also support the case where q_descale is not None.
-            if (block_table is not None and causal and dynamic_causal is None
-                    and not return_softmax_lse and softcap == 0.0
-                    and alibi_slopes is None and q_v is None
-                    and q_descale is None and scheduler_metadata is None
-                    and seqused_k is not None
-                    and 1 < max_seqlen_q <= _SPEC_DECODE_MAX_QLEN
-                    and batch > 0 and q.shape[0] > 0):
+            use_spec_decode = (
+                block_table is not None and causal and dynamic_causal is None
+                and not return_softmax_lse and softcap == 0.0
+                and alibi_slopes is None and q_v is None
+                and q_descale is None and scheduler_metadata is None
+                and seqused_k is not None
+                and 1 < max_seqlen_q <= _SPEC_DECODE_MAX_QLEN
+                and batch > 0 and q.shape[0] > 0)
+            if use_spec_decode:
                 return _spec_decode_varlen_fwd(
                     q,
                     k,
@@ -685,6 +688,13 @@ def flash_attn_varlen_func(
             # XPUGraph capture always refuses). When fallback is allowed,
             # emit the notice once per unique missing config and write
             # it straight to stderr.
+            #
+            # Spec-decode-eligible batches are the exception: they keep
+            # the upstream fallback even by default. The fast path is an
+            # optimization layered on decode, speculative verification
+            # downstream already guards correctness, and the fallback's
+            # padded-row preservation is what verification relies on
+            # (see test_spec_decode_varlen_kernel_error upstream).
             msg = (
                 "XPU kernel not compiled for this config, falling back "
                 "to PyTorch reference attention. Performance will be "
@@ -693,7 +703,7 @@ def flash_attn_varlen_func(
                 "If this is unexpected, report at: "
                 "https://github.com/vllm-project/vllm-xpu-kernels/issues/364\n"
                 f"Original error: {e}")
-            if _should_fail_closed():
+            if _should_fail_closed() and not use_spec_decode:
                 raise RuntimeError(
                     "Fail-closed attention (default): refusing PyTorch "
                     "attention fallback. Set VLLM_XPU_ATTN_ALLOW_FALLBACK=1 "

@@ -212,7 +212,12 @@ def test_device_host_kv_lens_split_plan_raises(monkeypatch):
         flash_attn_varlen_func(**args)
 
 
-def test_spec_decode_skipped_when_capturing(monkeypatch):
+def test_spec_decode_used_when_capturing(monkeypatch):
+    # The spec-decode fast path is capture-compatible: upstream's graph
+    # replay tests (test_spec_decode_varlen_graph_replay) capture and
+    # replay it and assert correct results across changing layouts, so
+    # capturing does not skip it. An earlier version of this test asserted
+    # the opposite; the replay tests are the stronger evidence.
     _require_fa2_xpu()
     monkeypatch.setattr(fai, "_is_xpu_capturing", lambda: True)
     called = {"spec": False, "fwd": False}
@@ -255,8 +260,8 @@ def test_spec_decode_skipped_when_capturing(monkeypatch):
         causal=True,
         out=out,
     )
-    assert called["spec"] is False
-    assert called["fwd"] is True
+    assert called["spec"] is True
+    assert called["fwd"] is False
 
 
 def test_fallback_allowed_when_opt_in_eager(monkeypatch, caplog):
