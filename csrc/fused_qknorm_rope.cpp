@@ -452,10 +452,11 @@ static inline int select_heads_per_sg(
     } else if (total_qk_units >= 4096) {
       heads_per_sg = 4;
     }
-    // The n_heads kernel keeps heads_per_sg * head_dim / 32 values per lane
-    // in registers; beyond 16 it spills, so cap by head_dim.
-    heads_per_sg = std::min(heads_per_sg, std::max(1, 512 / head_dim));
   }
+  // The n_heads kernel keeps heads_per_sg * head_dim / 32 values per lane
+  // in registers; beyond 16 it spills, so cap by head_dim. Larger values are
+  // not instantiated, so the cap also applies to a forced value.
+  heads_per_sg = std::min(heads_per_sg, std::max(1, 512 / head_dim));
 
   // Clamp to an instantiated value (1/2/4/8) that fits total_qk_heads.
   while (heads_per_sg > 1 && heads_per_sg > total_qk_heads) {
@@ -583,13 +584,16 @@ void launch_fused_qk_norm_rope(
         DISPATCH_KERNEL(HEAD_DIM, IS_NEOX_V, 1);   \
         break;                                     \
       case 2:                                      \
-        DISPATCH_KERNEL(HEAD_DIM, IS_NEOX_V, 2);   \
+        if constexpr (2 * (HEAD_DIM) <= 512)       \
+          DISPATCH_KERNEL(HEAD_DIM, IS_NEOX_V, 2); \
         break;                                     \
       case 4:                                      \
-        DISPATCH_KERNEL(HEAD_DIM, IS_NEOX_V, 4);   \
+        if constexpr (4 * (HEAD_DIM) <= 512)       \
+          DISPATCH_KERNEL(HEAD_DIM, IS_NEOX_V, 4); \
         break;                                     \
       case 8:                                      \
-        DISPATCH_KERNEL(HEAD_DIM, IS_NEOX_V, 8);   \
+        if constexpr (8 * (HEAD_DIM) <= 512)       \
+          DISPATCH_KERNEL(HEAD_DIM, IS_NEOX_V, 8); \
         break;                                     \
       default:                                     \
         DISPATCH_KERNEL(HEAD_DIM, IS_NEOX_V, 1);   \
