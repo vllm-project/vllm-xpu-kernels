@@ -630,6 +630,7 @@ std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
   sycl::range<3> local(1, 1, hpg_per_wg * SG_SIZE);
   sycl::range<3> global(num_tokens, n_groups, heads_per_group * SG_SIZE);
 
+  const at::DeviceGuard device_guard(o.device());
   auto& q = vllm::xpu::vllmGetQueue();
   auto launch = [&](auto mxfp8_tag) {
     using kernel_t =

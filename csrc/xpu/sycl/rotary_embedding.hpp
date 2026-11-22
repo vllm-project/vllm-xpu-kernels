@@ -174,6 +174,7 @@ inline void apply_token_rotary_embedding_gptj_vec(
     const scalar_t* __restrict__ cos_ptr,
     const scalar_t* __restrict__ sin_ptr,
     int rot_offset) {
+  using acc_t = rotary_acc_t<scalar_t>;
   using vec_t = sycl::vec<scalar_t, VEC_SIZE>;
   using vec2_t = sycl::vec<scalar_t, VEC_SIZE * 2>;
 
@@ -183,10 +184,12 @@ inline void apply_token_rotary_embedding_gptj_vec(
 
 #pragma unroll
   for (int j = 0; j < VEC_SIZE; ++j) {
-    const scalar_t x = v[2 * j];
-    const scalar_t y = v[2 * j + 1];
-    v[2 * j] = x * c[j] - y * s[j];
-    v[2 * j + 1] = y * c[j] + x * s[j];
+    const acc_t x = static_cast<acc_t>(v[2 * j]);
+    const acc_t y = static_cast<acc_t>(v[2 * j + 1]);
+    const acc_t cj = static_cast<acc_t>(c[j]);
+    const acc_t sj = static_cast<acc_t>(s[j]);
+    v[2 * j] = static_cast<scalar_t>(x * cj - y * sj);
+    v[2 * j + 1] = static_cast<scalar_t>(y * cj + x * sj);
   }
   *reinterpret_cast<vec2_t*>(output + rot_offset * 2) = v;
 }

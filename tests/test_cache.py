@@ -737,6 +737,25 @@ def test_dequantize_and_gather_k_cache(block_size, max_seq_len, batch_size,
                                       block_table, block_size, offset)
     torch.testing.assert_close(out, expected)
 
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_dequantize_and_gather_k_cache_out_capacity(device):
+    # seq_len exceeds the output token capacity; the rounded-up launch must
+    # not write past out.size(1).
+    block_size = 16
+    block_bytes = block_size * (576 + 8)
+    k_cache = torch.zeros((4, block_bytes), dtype=torch.uint8, device=device)
+    seq_lens = torch.tensor([2], dtype=torch.int32, device=device)
+    block_table = torch.zeros((1, 1), dtype=torch.int32, device=device)
+    # The zero cache dequantizes to zeros; the rows after out keep a sentinel.
+    buf = torch.full((1, 3, 512), 7.0, dtype=torch.bfloat16, device=device)
+    out = buf[:, :1]
+
+    ops.dequantize_and_gather_k_cache(out, k_cache, seq_lens, None,
+                                      block_table, block_size, 0)
+    assert torch.all(out == 0)
+    assert torch.all(buf[:, 1:] == 7.0)
+
 @torch.inference_mode()
 def test_concat_and_cache_mla_large_cache() -> None:
     # A cache view past 2^31 elements (one 4+ GiB bf16 MLA layer); 32-bit

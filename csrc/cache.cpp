@@ -604,7 +604,8 @@ class dequantize_and_gather_k_cache_kernel {
       int64_t cache_block_stride,
       int64_t block_table_stride,
       int32_t cache_block_size,
-      int32_t offset)
+      int32_t offset,
+      int32_t max_rows)
       : out_(out),
         k_cache_(k_cache),
         seq_lens_(seq_lens),
@@ -615,7 +616,8 @@ class dequantize_and_gather_k_cache_kernel {
         cache_block_stride_(cache_block_stride),
         block_table_stride_(block_table_stride),
         cache_block_size_(cache_block_size),
-        offset_(offset) {}
+        offset_(offset),
+        max_rows_(max_rows) {}
 
   void operator() [[sycl::reqd_sub_group_size(kSubgroupSize)]] (
       const sycl::nd_item<2>& item) const {
@@ -628,7 +630,9 @@ class dequantize_and_gather_k_cache_kernel {
     const int gather_len =
         gather_lens_ == nullptr ? seq_len : gather_lens_[batch_idx];
     const int out_row = row_tile * kRowsPerGroup + subgroup_idx;
-    if (out_row >= gather_len) {
+    // The grid is rounded up to kRowsPerGroup rows, so also guard against the
+    // output/block_table capacity.
+    if (out_row >= gather_len || out_row >= max_rows_) {
       return;
     }
 
@@ -703,6 +707,7 @@ class dequantize_and_gather_k_cache_kernel {
   int64_t block_table_stride_;
   int32_t cache_block_size_;
   int32_t offset_;
+  int32_t max_rows_;
 };
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
@@ -1752,7 +1757,8 @@ void dequantize_and_gather_k_cache(
           cache_block_stride,
           block_table_stride,
           block_size_i32,
-          offset_i32));
+          offset_i32,
+          static_cast<int32_t>(max_token_hint)));
 }
 
   // Macro to dispatch the kernel based on the data type.

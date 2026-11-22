@@ -167,13 +167,16 @@ CONFIGS = [
         "t32_h32kv8_ropenorm_fp8",
     ],
 )
+@pytest.mark.parametrize("missing_norm", [None, "q", "k"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("seed", [42])
 @torch.inference_mode()
 def test_fused_rope_norm_store_kv_fp8(
     num_tokens, num_heads, num_kv_heads, qk_norm_policy, use_fp8,
-    dtype, seed,
+    missing_norm, dtype, seed,
 ):
+    if missing_norm is not None and qk_norm_policy == 0:
+        pytest.skip("norm weights are unused without a norm policy")
     torch.manual_seed(seed)
 
     q_per_kv = num_heads // num_kv_heads
@@ -216,6 +219,11 @@ def test_fused_rope_norm_store_kv_fp8(
                                     device="cpu").normal_(mean=1.0, std=0.1)
         k_norm_weight = torch.empty(HEAD_DIM, dtype=torch.float32,
                                     device="cpu").normal_(mean=1.0, std=0.1)
+    # An absent weight skips the corresponding normalization.
+    if missing_norm == "q":
+        q_norm_weight = None
+    elif missing_norm == "k":
+        k_norm_weight = None
 
     # Q output buffer
     if use_fp8:
@@ -315,6 +323,32 @@ def test_fused_rope_norm_store_kv_fp8(
 
     print(f"  PASSED: tokens={num_tokens}, heads={num_heads}/"
           f"{num_kv_heads}, norm={qk_norm_policy}, fp8={use_fp8}")
+
+
+@torch.inference_mode()
+def test_mismatched_kv_cache_layout_rejected():
+    num_tokens, num_heads, num_kv_heads = 4, 16, 4
+    total_dim = (num_heads + 2 * num_kv_heads) * HEAD_DIM
+    qkv = torch.randn(num_tokens, total_dim, dtype=torch.bfloat16,
+                      device=DEVICE)
+    positions = torch.arange(num_tokens, dtype=torch.long, device=DEVICE)
+    cos_sin_cache = _build_cos_sin_cache(MAX_POS, HEAD_DIM, device=DEVICE)
+    # K is a view unbound from a joint [blocks, 2, S, H, D] cache while V is
+    # contiguous, so their strides differ.
+    kv_cache = torch.zeros(2, 2, BLOCK_SIZE, num_kv_heads, HEAD_DIM,
+                           dtype=torch.uint8, device=DEVICE)
+    key_cache = kv_cache[:, 0]
+    value_cache = key_cache.contiguous()
+    slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=DEVICE)
+    out_q = torch.zeros(num_tokens, num_heads, HEAD_DIM, dtype=torch.uint8,
+                        device=DEVICE)
+    scale = torch.ones(1, dtype=torch.float32, device=DEVICE)
+
+    with pytest.raises(RuntimeError, match="same shape, strides"):
+        torch.ops._xpu_C.fused_rope_norm_store_kv_fp8(
+            qkv, cos_sin_cache, positions, key_cache, value_cache,
+            slot_mapping, out_q, num_heads, num_kv_heads, HEAD_DIM, scale,
+            scale, None, None, 0, True)
 
 
 @pytest.mark.parametrize("num_tokens", [8])

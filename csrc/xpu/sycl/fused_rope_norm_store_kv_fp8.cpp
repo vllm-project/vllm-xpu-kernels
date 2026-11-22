@@ -161,6 +161,9 @@ class fused_rope_norm_store_kv_fp8_kernel {
     const int half_dim = HEAD_DIM / 2;
     const float* cos_ptr = my_cos_sin;
     const float* sin_ptr = my_cos_sin + half_dim;
+    // An absent norm weight skips that normalization.
+    const bool apply_q_norm = q_norm_weight_ != nullptr;
+    const bool apply_k_norm = k_norm_weight_ != nullptr;
 
     // ==========================================================
     // Process Q_PER_KV Q heads: Norm → RoPE → FP8 quant → store
@@ -178,7 +181,8 @@ class fused_rope_norm_store_kv_fp8_kernel {
       }
 
       // Norm before RoPE.
-      if (qk_norm_policy_ == static_cast<int>(QkNormPolicy::NORM_THEN_ROPE)) {
+      if (apply_q_norm &&
+          qk_norm_policy_ == static_cast<int>(QkNormPolicy::NORM_THEN_ROPE)) {
         apply_rms_norm(sg, lane, elems, slm_q_norm);
       }
 
@@ -186,7 +190,8 @@ class fused_rope_norm_store_kv_fp8_kernel {
       apply_rope_neox(sg, lane, elems, cos_ptr, sin_ptr);
 
       // Norm after RoPE.
-      if (qk_norm_policy_ == static_cast<int>(QkNormPolicy::ROPE_THEN_NORM)) {
+      if (apply_q_norm &&
+          qk_norm_policy_ == static_cast<int>(QkNormPolicy::ROPE_THEN_NORM)) {
         apply_rms_norm(sg, lane, elems, slm_q_norm);
       }
 
@@ -206,13 +211,15 @@ class fused_rope_norm_store_kv_fp8_kernel {
         elems[i] = static_cast<float>(qkv_[k_offset + i]);
       }
 
-      if (qk_norm_policy_ == static_cast<int>(QkNormPolicy::NORM_THEN_ROPE)) {
+      if (apply_k_norm &&
+          qk_norm_policy_ == static_cast<int>(QkNormPolicy::NORM_THEN_ROPE)) {
         apply_rms_norm(sg, lane, elems, slm_k_norm);
       }
 
       apply_rope_neox(sg, lane, elems, cos_ptr, sin_ptr);
 
-      if (qk_norm_policy_ == static_cast<int>(QkNormPolicy::ROPE_THEN_NORM)) {
+      if (apply_k_norm &&
+          qk_norm_policy_ == static_cast<int>(QkNormPolicy::ROPE_THEN_NORM)) {
         apply_rms_norm(sg, lane, elems, slm_k_norm);
       }
 
@@ -527,6 +534,13 @@ torch::Tensor fused_rope_norm_store_kv_fp8(
       value_cache.dim() == 4,
       "value_cache must be 4D [num_blocks, block_size, num_kv_heads, "
       "head_dim]");
+  // The kernel addresses both caches with key_cache's layout.
+  TORCH_CHECK(
+      value_cache.sizes() == key_cache.sizes() &&
+          value_cache.strides() == key_cache.strides() &&
+          value_cache.element_size() == key_cache.element_size(),
+      "key_cache and value_cache must have the same shape, strides and "
+      "element size");
   TORCH_CHECK(
       cos_sin_cache.scalar_type() == torch::kFloat32,
       "cos_sin_cache must be float32");
