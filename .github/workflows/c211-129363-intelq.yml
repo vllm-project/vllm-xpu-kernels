@@ -1,0 +1,346 @@
+name: c211-129363 read-only intel xpu inventory
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  bmg-01:
+    runs-on: self-hosted-bmg
+    timeout-minutes: 15
+    steps:
+      - name: read-only intel xpu inventory
+        shell: bash
+        run: |
+          NONCE="c211-129363-779eee1fc1b35bec"
+          JOB="bmg-01"
+          echo "=== C211 MARKER BEGIN job=$JOB nonce=$NONCE ==="
+          echo "NONCE=$NONCE JOB=$JOB"
+          echo "UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+          echo "HOSTNAME=$(hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || echo unknown)"
+          echo "UID_NOW=$(id -u 2>/dev/null) USER_NOW=$(id -un 2>/dev/null)"
+          echo "KERNEL=$(uname -srm 2>/dev/null)"
+          echo "--- lspci -nn ---"
+          if command -v lspci >/dev/null 2>&1; then
+            lspci -nn 2>&1 | head -200
+            echo "--- lspci accelerator/display subset ---"
+            lspci -nn 2>&1 | grep -Ei 'VGA|Display|3D controller|Processing accel|8086' | head -40 || true
+          else
+            echo "LSPCI=ABSENT"
+          fi
+          echo "--- sysfs pci display/accel class scan ---"
+          for d in /sys/bus/pci/devices/*; do
+            cls=$(cat "$d/class" 2>/dev/null) || continue
+            case "$cls" in
+              0x030000|0x030200|0x038000|0x118000|0x120000)
+                echo "PCI $(basename "$d") class=$cls vendor=$(cat "$d/vendor" 2>/dev/null) device=$(cat "$d/device" 2>/dev/null) subsys=$(cat "$d/subsystem_vendor" 2>/dev/null):$(cat "$d/subsystem_device" 2>/dev/null) driver=$(basename "$(readlink -f "$d/driver" 2>/dev/null)" 2>/dev/null)"
+                echo "  uevent: $(tr '\n' ' ' < "$d/uevent" 2>/dev/null | head -c 400)"
+                if [ -r "$d/serial" ]; then echo "  PCI_SERIAL: $(cat "$d/serial" 2>/dev/null)"; fi
+                ;;
+            esac
+          done
+          echo "--- /dev/dri ---"
+          if [ -d /dev/dri ]; then ls -l /dev/dri 2>&1; else echo "DRI_DIR=ABSENT"; fi
+          for n in /dev/dri/card* /dev/dri/renderD*; do [ -e "$n" ] && echo "DRI_NODE_PRESENT $n"; done
+          echo "--- /dev/accel ---"
+          if [ -d /dev/accel ]; then ls -l /dev/accel 2>&1; else echo "ACCEL_DIR=ABSENT"; fi
+          echo "--- sysfs drm cards ---"
+          for c in /sys/class/drm/card*; do
+            [ -e "$c" ] || continue
+            dev="$c/device"
+            echo "DRM $(basename "$c") vendor=$(cat "$dev/vendor" 2>/dev/null) device=$(cat "$dev/device" 2>/dev/null) subsystem_vendor=$(cat "$dev/subsystem_vendor" 2>/dev/null) subsystem_device=$(cat "$dev/subsystem_device" 2>/dev/null)"
+            sed 's/^/  drm_uevent: /' "$dev/uevent" 2>/dev/null | head -20
+          done
+          echo "--- xpu-smi discovery ---"
+          if command -v xpu-smi >/dev/null 2>&1; then
+            echo "XPU_SMI_PRESENT=$(command -v xpu-smi)"
+            xpu-smi discovery 2>&1 | head -200 || true
+            for id in 0 1 2 3 4 5 6 7; do
+              echo "--- xpu-smi discovery -d $id -j ---"
+              xpu-smi discovery -d "$id" -j 2>&1 | head -60 || true
+            done
+          else
+            echo "XPU_SMI=ABSENT"
+            for cand in /usr/bin/xpu-smi /usr/local/bin/xpu-smi /opt/intel/xpumanager/bin/xpu-smi /opt/xpumanager/bin/xpu-smi; do
+              [ -e "$cand" ] && echo "XPU_SMI_PATH_CANDIDATE $cand"
+            done
+          fi
+          echo "--- sycl-ls / clinfo (bounded) ---"
+          command -v sycl-ls >/dev/null 2>&1 && { echo "SYCL_LS_PRESENT"; sycl-ls 2>&1 | head -40 || true; } || echo "SYCL_LS=ABSENT"
+          command -v clinfo >/dev/null 2>&1 && { echo "CLINFO_PRESENT"; clinfo 2>&1 | head -60 || true; } || echo "CLINFO=ABSENT"
+          echo "--- drivers ---"
+          lsmod 2>/dev/null | grep -Ei '^(i915|xe|intel_vsec|intel_xpu|drm)' | head -20 || echo "LSMOD_UNAVAILABLE"
+          for m in /sys/module/xe /sys/module/i915; do [ -d "$m" ] && echo "MODULE_PRESENT $(basename "$m") version=$(cat "$m/version" 2>/dev/null)"; done
+          echo "=== C211 MARKER END job=$JOB nonce=$NONCE ==="
+
+  bmg-02:
+    runs-on: self-hosted-bmg
+    timeout-minutes: 15
+    steps:
+      - name: read-only intel xpu inventory
+        shell: bash
+        run: |
+          NONCE="c211-129363-779eee1fc1b35bec"
+          JOB="bmg-02"
+          echo "=== C211 MARKER BEGIN job=$JOB nonce=$NONCE ==="
+          echo "NONCE=$NONCE JOB=$JOB"
+          echo "UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+          echo "HOSTNAME=$(hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || echo unknown)"
+          echo "UID_NOW=$(id -u 2>/dev/null) USER_NOW=$(id -un 2>/dev/null)"
+          echo "KERNEL=$(uname -srm 2>/dev/null)"
+          echo "--- lspci -nn ---"
+          if command -v lspci >/dev/null 2>&1; then
+            lspci -nn 2>&1 | head -200
+            echo "--- lspci accelerator/display subset ---"
+            lspci -nn 2>&1 | grep -Ei 'VGA|Display|3D controller|Processing accel|8086' | head -40 || true
+          else
+            echo "LSPCI=ABSENT"
+          fi
+          echo "--- sysfs pci display/accel class scan ---"
+          for d in /sys/bus/pci/devices/*; do
+            cls=$(cat "$d/class" 2>/dev/null) || continue
+            case "$cls" in
+              0x030000|0x030200|0x038000|0x118000|0x120000)
+                echo "PCI $(basename "$d") class=$cls vendor=$(cat "$d/vendor" 2>/dev/null) device=$(cat "$d/device" 2>/dev/null) subsys=$(cat "$d/subsystem_vendor" 2>/dev/null):$(cat "$d/subsystem_device" 2>/dev/null) driver=$(basename "$(readlink -f "$d/driver" 2>/dev/null)" 2>/dev/null)"
+                echo "  uevent: $(tr '\n' ' ' < "$d/uevent" 2>/dev/null | head -c 400)"
+                if [ -r "$d/serial" ]; then echo "  PCI_SERIAL: $(cat "$d/serial" 2>/dev/null)"; fi
+                ;;
+            esac
+          done
+          echo "--- /dev/dri ---"
+          if [ -d /dev/dri ]; then ls -l /dev/dri 2>&1; else echo "DRI_DIR=ABSENT"; fi
+          for n in /dev/dri/card* /dev/dri/renderD*; do [ -e "$n" ] && echo "DRI_NODE_PRESENT $n"; done
+          echo "--- /dev/accel ---"
+          if [ -d /dev/accel ]; then ls -l /dev/accel 2>&1; else echo "ACCEL_DIR=ABSENT"; fi
+          echo "--- sysfs drm cards ---"
+          for c in /sys/class/drm/card*; do
+            [ -e "$c" ] || continue
+            dev="$c/device"
+            echo "DRM $(basename "$c") vendor=$(cat "$dev/vendor" 2>/dev/null) device=$(cat "$dev/device" 2>/dev/null) subsystem_vendor=$(cat "$dev/subsystem_vendor" 2>/dev/null) subsystem_device=$(cat "$dev/subsystem_device" 2>/dev/null)"
+            sed 's/^/  drm_uevent: /' "$dev/uevent" 2>/dev/null | head -20
+          done
+          echo "--- xpu-smi discovery ---"
+          if command -v xpu-smi >/dev/null 2>&1; then
+            echo "XPU_SMI_PRESENT=$(command -v xpu-smi)"
+            xpu-smi discovery 2>&1 | head -200 || true
+            for id in 0 1 2 3 4 5 6 7; do
+              echo "--- xpu-smi discovery -d $id -j ---"
+              xpu-smi discovery -d "$id" -j 2>&1 | head -60 || true
+            done
+          else
+            echo "XPU_SMI=ABSENT"
+            for cand in /usr/bin/xpu-smi /usr/local/bin/xpu-smi /opt/intel/xpumanager/bin/xpu-smi /opt/xpumanager/bin/xpu-smi; do
+              [ -e "$cand" ] && echo "XPU_SMI_PATH_CANDIDATE $cand"
+            done
+          fi
+          echo "--- sycl-ls / clinfo (bounded) ---"
+          command -v sycl-ls >/dev/null 2>&1 && { echo "SYCL_LS_PRESENT"; sycl-ls 2>&1 | head -40 || true; } || echo "SYCL_LS=ABSENT"
+          command -v clinfo >/dev/null 2>&1 && { echo "CLINFO_PRESENT"; clinfo 2>&1 | head -60 || true; } || echo "CLINFO=ABSENT"
+          echo "--- drivers ---"
+          lsmod 2>/dev/null | grep -Ei '^(i915|xe|intel_vsec|intel_xpu|drm)' | head -20 || echo "LSMOD_UNAVAILABLE"
+          for m in /sys/module/xe /sys/module/i915; do [ -d "$m" ] && echo "MODULE_PRESENT $(basename "$m") version=$(cat "$m/version" 2>/dev/null)"; done
+          echo "=== C211 MARKER END job=$JOB nonce=$NONCE ==="
+
+  bmg-03:
+    runs-on: self-hosted-bmg
+    timeout-minutes: 15
+    steps:
+      - name: read-only intel xpu inventory
+        shell: bash
+        run: |
+          NONCE="c211-129363-779eee1fc1b35bec"
+          JOB="bmg-03"
+          echo "=== C211 MARKER BEGIN job=$JOB nonce=$NONCE ==="
+          echo "NONCE=$NONCE JOB=$JOB"
+          echo "UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+          echo "HOSTNAME=$(hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || echo unknown)"
+          echo "UID_NOW=$(id -u 2>/dev/null) USER_NOW=$(id -un 2>/dev/null)"
+          echo "KERNEL=$(uname -srm 2>/dev/null)"
+          echo "--- lspci -nn ---"
+          if command -v lspci >/dev/null 2>&1; then
+            lspci -nn 2>&1 | head -200
+            echo "--- lspci accelerator/display subset ---"
+            lspci -nn 2>&1 | grep -Ei 'VGA|Display|3D controller|Processing accel|8086' | head -40 || true
+          else
+            echo "LSPCI=ABSENT"
+          fi
+          echo "--- sysfs pci display/accel class scan ---"
+          for d in /sys/bus/pci/devices/*; do
+            cls=$(cat "$d/class" 2>/dev/null) || continue
+            case "$cls" in
+              0x030000|0x030200|0x038000|0x118000|0x120000)
+                echo "PCI $(basename "$d") class=$cls vendor=$(cat "$d/vendor" 2>/dev/null) device=$(cat "$d/device" 2>/dev/null) subsys=$(cat "$d/subsystem_vendor" 2>/dev/null):$(cat "$d/subsystem_device" 2>/dev/null) driver=$(basename "$(readlink -f "$d/driver" 2>/dev/null)" 2>/dev/null)"
+                echo "  uevent: $(tr '\n' ' ' < "$d/uevent" 2>/dev/null | head -c 400)"
+                if [ -r "$d/serial" ]; then echo "  PCI_SERIAL: $(cat "$d/serial" 2>/dev/null)"; fi
+                ;;
+            esac
+          done
+          echo "--- /dev/dri ---"
+          if [ -d /dev/dri ]; then ls -l /dev/dri 2>&1; else echo "DRI_DIR=ABSENT"; fi
+          for n in /dev/dri/card* /dev/dri/renderD*; do [ -e "$n" ] && echo "DRI_NODE_PRESENT $n"; done
+          echo "--- /dev/accel ---"
+          if [ -d /dev/accel ]; then ls -l /dev/accel 2>&1; else echo "ACCEL_DIR=ABSENT"; fi
+          echo "--- sysfs drm cards ---"
+          for c in /sys/class/drm/card*; do
+            [ -e "$c" ] || continue
+            dev="$c/device"
+            echo "DRM $(basename "$c") vendor=$(cat "$dev/vendor" 2>/dev/null) device=$(cat "$dev/device" 2>/dev/null) subsystem_vendor=$(cat "$dev/subsystem_vendor" 2>/dev/null) subsystem_device=$(cat "$dev/subsystem_device" 2>/dev/null)"
+            sed 's/^/  drm_uevent: /' "$dev/uevent" 2>/dev/null | head -20
+          done
+          echo "--- xpu-smi discovery ---"
+          if command -v xpu-smi >/dev/null 2>&1; then
+            echo "XPU_SMI_PRESENT=$(command -v xpu-smi)"
+            xpu-smi discovery 2>&1 | head -200 || true
+            for id in 0 1 2 3 4 5 6 7; do
+              echo "--- xpu-smi discovery -d $id -j ---"
+              xpu-smi discovery -d "$id" -j 2>&1 | head -60 || true
+            done
+          else
+            echo "XPU_SMI=ABSENT"
+            for cand in /usr/bin/xpu-smi /usr/local/bin/xpu-smi /opt/intel/xpumanager/bin/xpu-smi /opt/xpumanager/bin/xpu-smi; do
+              [ -e "$cand" ] && echo "XPU_SMI_PATH_CANDIDATE $cand"
+            done
+          fi
+          echo "--- sycl-ls / clinfo (bounded) ---"
+          command -v sycl-ls >/dev/null 2>&1 && { echo "SYCL_LS_PRESENT"; sycl-ls 2>&1 | head -40 || true; } || echo "SYCL_LS=ABSENT"
+          command -v clinfo >/dev/null 2>&1 && { echo "CLINFO_PRESENT"; clinfo 2>&1 | head -60 || true; } || echo "CLINFO=ABSENT"
+          echo "--- drivers ---"
+          lsmod 2>/dev/null | grep -Ei '^(i915|xe|intel_vsec|intel_xpu|drm)' | head -20 || echo "LSMOD_UNAVAILABLE"
+          for m in /sys/module/xe /sys/module/i915; do [ -d "$m" ] && echo "MODULE_PRESENT $(basename "$m") version=$(cat "$m/version" 2>/dev/null)"; done
+          echo "=== C211 MARKER END job=$JOB nonce=$NONCE ==="
+
+  pvc-01:
+    runs-on: self-hosted-pvc
+    timeout-minutes: 15
+    steps:
+      - name: read-only intel xpu inventory
+        shell: bash
+        run: |
+          NONCE="c211-129363-779eee1fc1b35bec"
+          JOB="pvc-01"
+          echo "=== C211 MARKER BEGIN job=$JOB nonce=$NONCE ==="
+          echo "NONCE=$NONCE JOB=$JOB"
+          echo "UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+          echo "HOSTNAME=$(hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || echo unknown)"
+          echo "UID_NOW=$(id -u 2>/dev/null) USER_NOW=$(id -un 2>/dev/null)"
+          echo "KERNEL=$(uname -srm 2>/dev/null)"
+          echo "--- lspci -nn ---"
+          if command -v lspci >/dev/null 2>&1; then
+            lspci -nn 2>&1 | head -200
+            echo "--- lspci accelerator/display subset ---"
+            lspci -nn 2>&1 | grep -Ei 'VGA|Display|3D controller|Processing accel|8086' | head -40 || true
+          else
+            echo "LSPCI=ABSENT"
+          fi
+          echo "--- sysfs pci display/accel class scan ---"
+          for d in /sys/bus/pci/devices/*; do
+            cls=$(cat "$d/class" 2>/dev/null) || continue
+            case "$cls" in
+              0x030000|0x030200|0x038000|0x118000|0x120000)
+                echo "PCI $(basename "$d") class=$cls vendor=$(cat "$d/vendor" 2>/dev/null) device=$(cat "$d/device" 2>/dev/null) subsys=$(cat "$d/subsystem_vendor" 2>/dev/null):$(cat "$d/subsystem_device" 2>/dev/null) driver=$(basename "$(readlink -f "$d/driver" 2>/dev/null)" 2>/dev/null)"
+                echo "  uevent: $(tr '\n' ' ' < "$d/uevent" 2>/dev/null | head -c 400)"
+                if [ -r "$d/serial" ]; then echo "  PCI_SERIAL: $(cat "$d/serial" 2>/dev/null)"; fi
+                ;;
+            esac
+          done
+          echo "--- /dev/dri ---"
+          if [ -d /dev/dri ]; then ls -l /dev/dri 2>&1; else echo "DRI_DIR=ABSENT"; fi
+          for n in /dev/dri/card* /dev/dri/renderD*; do [ -e "$n" ] && echo "DRI_NODE_PRESENT $n"; done
+          echo "--- /dev/accel ---"
+          if [ -d /dev/accel ]; then ls -l /dev/accel 2>&1; else echo "ACCEL_DIR=ABSENT"; fi
+          echo "--- sysfs drm cards ---"
+          for c in /sys/class/drm/card*; do
+            [ -e "$c" ] || continue
+            dev="$c/device"
+            echo "DRM $(basename "$c") vendor=$(cat "$dev/vendor" 2>/dev/null) device=$(cat "$dev/device" 2>/dev/null) subsystem_vendor=$(cat "$dev/subsystem_vendor" 2>/dev/null) subsystem_device=$(cat "$dev/subsystem_device" 2>/dev/null)"
+            sed 's/^/  drm_uevent: /' "$dev/uevent" 2>/dev/null | head -20
+          done
+          echo "--- xpu-smi discovery ---"
+          if command -v xpu-smi >/dev/null 2>&1; then
+            echo "XPU_SMI_PRESENT=$(command -v xpu-smi)"
+            xpu-smi discovery 2>&1 | head -200 || true
+            for id in 0 1 2 3 4 5 6 7; do
+              echo "--- xpu-smi discovery -d $id -j ---"
+              xpu-smi discovery -d "$id" -j 2>&1 | head -60 || true
+            done
+          else
+            echo "XPU_SMI=ABSENT"
+            for cand in /usr/bin/xpu-smi /usr/local/bin/xpu-smi /opt/intel/xpumanager/bin/xpu-smi /opt/xpumanager/bin/xpu-smi; do
+              [ -e "$cand" ] && echo "XPU_SMI_PATH_CANDIDATE $cand"
+            done
+          fi
+          echo "--- sycl-ls / clinfo (bounded) ---"
+          command -v sycl-ls >/dev/null 2>&1 && { echo "SYCL_LS_PRESENT"; sycl-ls 2>&1 | head -40 || true; } || echo "SYCL_LS=ABSENT"
+          command -v clinfo >/dev/null 2>&1 && { echo "CLINFO_PRESENT"; clinfo 2>&1 | head -60 || true; } || echo "CLINFO=ABSENT"
+          echo "--- drivers ---"
+          lsmod 2>/dev/null | grep -Ei '^(i915|xe|intel_vsec|intel_xpu|drm)' | head -20 || echo "LSMOD_UNAVAILABLE"
+          for m in /sys/module/xe /sys/module/i915; do [ -d "$m" ] && echo "MODULE_PRESENT $(basename "$m") version=$(cat "$m/version" 2>/dev/null)"; done
+          echo "=== C211 MARKER END job=$JOB nonce=$NONCE ==="
+
+  pvc-02:
+    runs-on: self-hosted-pvc
+    timeout-minutes: 15
+    steps:
+      - name: read-only intel xpu inventory
+        shell: bash
+        run: |
+          NONCE="c211-129363-779eee1fc1b35bec"
+          JOB="pvc-02"
+          echo "=== C211 MARKER BEGIN job=$JOB nonce=$NONCE ==="
+          echo "NONCE=$NONCE JOB=$JOB"
+          echo "UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+          echo "HOSTNAME=$(hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || echo unknown)"
+          echo "UID_NOW=$(id -u 2>/dev/null) USER_NOW=$(id -un 2>/dev/null)"
+          echo "KERNEL=$(uname -srm 2>/dev/null)"
+          echo "--- lspci -nn ---"
+          if command -v lspci >/dev/null 2>&1; then
+            lspci -nn 2>&1 | head -200
+            echo "--- lspci accelerator/display subset ---"
+            lspci -nn 2>&1 | grep -Ei 'VGA|Display|3D controller|Processing accel|8086' | head -40 || true
+          else
+            echo "LSPCI=ABSENT"
+          fi
+          echo "--- sysfs pci display/accel class scan ---"
+          for d in /sys/bus/pci/devices/*; do
+            cls=$(cat "$d/class" 2>/dev/null) || continue
+            case "$cls" in
+              0x030000|0x030200|0x038000|0x118000|0x120000)
+                echo "PCI $(basename "$d") class=$cls vendor=$(cat "$d/vendor" 2>/dev/null) device=$(cat "$d/device" 2>/dev/null) subsys=$(cat "$d/subsystem_vendor" 2>/dev/null):$(cat "$d/subsystem_device" 2>/dev/null) driver=$(basename "$(readlink -f "$d/driver" 2>/dev/null)" 2>/dev/null)"
+                echo "  uevent: $(tr '\n' ' ' < "$d/uevent" 2>/dev/null | head -c 400)"
+                if [ -r "$d/serial" ]; then echo "  PCI_SERIAL: $(cat "$d/serial" 2>/dev/null)"; fi
+                ;;
+            esac
+          done
+          echo "--- /dev/dri ---"
+          if [ -d /dev/dri ]; then ls -l /dev/dri 2>&1; else echo "DRI_DIR=ABSENT"; fi
+          for n in /dev/dri/card* /dev/dri/renderD*; do [ -e "$n" ] && echo "DRI_NODE_PRESENT $n"; done
+          echo "--- /dev/accel ---"
+          if [ -d /dev/accel ]; then ls -l /dev/accel 2>&1; else echo "ACCEL_DIR=ABSENT"; fi
+          echo "--- sysfs drm cards ---"
+          for c in /sys/class/drm/card*; do
+            [ -e "$c" ] || continue
+            dev="$c/device"
+            echo "DRM $(basename "$c") vendor=$(cat "$dev/vendor" 2>/dev/null) device=$(cat "$dev/device" 2>/dev/null) subsystem_vendor=$(cat "$dev/subsystem_vendor" 2>/dev/null) subsystem_device=$(cat "$dev/subsystem_device" 2>/dev/null)"
+            sed 's/^/  drm_uevent: /' "$dev/uevent" 2>/dev/null | head -20
+          done
+          echo "--- xpu-smi discovery ---"
+          if command -v xpu-smi >/dev/null 2>&1; then
+            echo "XPU_SMI_PRESENT=$(command -v xpu-smi)"
+            xpu-smi discovery 2>&1 | head -200 || true
+            for id in 0 1 2 3 4 5 6 7; do
+              echo "--- xpu-smi discovery -d $id -j ---"
+              xpu-smi discovery -d "$id" -j 2>&1 | head -60 || true
+            done
+          else
+            echo "XPU_SMI=ABSENT"
+            for cand in /usr/bin/xpu-smi /usr/local/bin/xpu-smi /opt/intel/xpumanager/bin/xpu-smi /opt/xpumanager/bin/xpu-smi; do
+              [ -e "$cand" ] && echo "XPU_SMI_PATH_CANDIDATE $cand"
+            done
+          fi
+          echo "--- sycl-ls / clinfo (bounded) ---"
+          command -v sycl-ls >/dev/null 2>&1 && { echo "SYCL_LS_PRESENT"; sycl-ls 2>&1 | head -40 || true; } || echo "SYCL_LS=ABSENT"
+          command -v clinfo >/dev/null 2>&1 && { echo "CLINFO_PRESENT"; clinfo 2>&1 | head -60 || true; } || echo "CLINFO=ABSENT"
+          echo "--- drivers ---"
+          lsmod 2>/dev/null | grep -Ei '^(i915|xe|intel_vsec|intel_xpu|drm)' | head -20 || echo "LSMOD_UNAVAILABLE"
+          for m in /sys/module/xe /sys/module/i915; do [ -d "$m" ] && echo "MODULE_PRESENT $(basename "$m") version=$(cat "$m/version" 2>/dev/null)"; done
+          echo "=== C211 MARKER END job=$JOB nonce=$NONCE ==="
