@@ -201,7 +201,10 @@ def ref_gdn_attention(
             out_buf[token_id] = torch.einsum("vhk,vk->vh", ssm_state_batch,
                                              q_t)
 
-        core_attn_out[batch_start_id:batch_end_id] = out_buf.to(dtype)
+        # Keep the reference at the core_attn_out precision (it may be
+        # widened, e.g. fp32 out with fp16 activations).
+        core_attn_out[batch_start_id:batch_end_id] = out_buf.to(
+            core_attn_out.dtype)
         ssm_state[non_spec_state_indices_tensor[batch]] = ssm_state_batch.to(
             ssm_state.dtype)
 
@@ -424,6 +427,205 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
 
     torch.testing.assert_close(z, ref_z, atol=atol, rtol=rtol)
 
+    torch.testing.assert_close(core_attn_out,
+                               ref_core_attn_out,
+                               atol=atol,
+                               rtol=rtol,
+                               equal_nan=True)
+    for i in range(batch_size):
+        state_id = non_spec_state_indices_tensor[i]
+        torch.testing.assert_close(conv_state_as_sd(
+            conv_state, conv_state_layout)[state_id],
+                                   ref_conv_state[state_id],
+                                   atol=atol,
+                                   rtol=rtol)
+        torch.testing.assert_close(ssm_state[state_id],
+                                   ref_ssm_state[state_id],
+                                   atol=atol,
+                                   rtol=rtol)
+
+
+# Focused prefill regression: fp32 core_attn_out with an fp16/bf16
+# activation (vLLM dtype contract from vllm-project/vllm#69250). 96 tokens
+# per sequence cross the Xe2 chunked prefill kernel's 64-token chunk.
+FP32_OUT_NUM_ACTUAL_TOKENS = 192
+FP32_OUT_BATCH_SIZE = 2
+FP32_OUT_NUM_K_HEADS = 16
+FP32_OUT_HEAD_DIM = 128
+FP32_OUT_NUM_V_HEADS = 32
+FP32_OUT_WIDTH = 4
+FP32_OUT_TP_SIZE = 1
+
+
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@torch.inference_mode()
+def test_gdn_attention_fp32_core_out(dtype):
+    """Prefill must accept an fp32 core_attn_out.
+
+    vLLM widens core_attn_out to fp32 when the ssm state is fp32, because
+    the unnormalized fp16 readout would overflow (vllm-project/vllm#69250).
+    The Xe2 chunked prefill kernel must accept the wider output while
+    q/k/v and z stay in the activation dtype and dt_bias is pre-cast to
+    the output dtype.
+    """
+    if (os.getenv("SKIP_ACC_ERROR_KERNEL") is not None
+            and os.getenv("SKIP_ACC_ERROR_KERNEL") == "1"):
+        pytest.skip("skip gdn attention kernels testing on PVC.")
+
+    device = "xpu"
+    random.seed(42)
+    torch.manual_seed(42)
+
+    num_actual_tokens = FP32_OUT_NUM_ACTUAL_TOKENS
+    batch_size = FP32_OUT_BATCH_SIZE
+    num_k_heads = FP32_OUT_NUM_K_HEADS
+    head_k_dim = FP32_OUT_HEAD_DIM
+    head_v_dim = FP32_OUT_HEAD_DIM
+    num_v_heads = FP32_OUT_NUM_V_HEADS
+    width = FP32_OUT_WIDTH
+    tp_size = FP32_OUT_TP_SIZE
+    activation = "silu"
+    reorder_input = False
+    conv_state_layout = "SD"
+
+    num_prefills = batch_size
+    num_decodes = 0
+    cache_batch_size = 200
+
+    mixed_qkvz_size = num_k_heads // tp_size * (
+        2 * head_k_dim + 2 * head_v_dim * num_v_heads // num_k_heads)
+    mixed_ba_size = num_k_heads // tp_size * (2 * num_v_heads // num_k_heads)
+    mixed_qkv_size = num_k_heads // tp_size * (
+        2 * head_k_dim + head_v_dim * num_v_heads // num_k_heads)
+
+    projected_states_qkvz = torch.randn((num_actual_tokens, mixed_qkvz_size),
+                                        dtype=dtype,
+                                        device=device)
+    projected_states_ba = torch.randn((num_actual_tokens, mixed_ba_size),
+                                      dtype=dtype,
+                                      device=device)
+    conv_state = torch.randn((cache_batch_size, width - 1, mixed_qkv_size),
+                             dtype=dtype,
+                             device=device)
+    ref_conv_state = conv_state.clone()
+    conv_state = to_conv_state_layout(conv_state, conv_state_layout)
+    ssm_state = torch.randn(
+        (cache_batch_size, num_v_heads // tp_size, head_v_dim, head_k_dim),
+        dtype=torch.float32,
+        device=device)
+    ref_ssm_state = ssm_state.clone()
+    conv_weights = torch.randn((mixed_qkv_size, width),
+                               dtype=dtype,
+                               device=device)
+    conv_bias = torch.randn((mixed_qkv_size), dtype=dtype, device=device)
+    A_log = torch.randn((num_v_heads // tp_size),
+                        dtype=torch.float32,
+                        device=device)
+    # vLLM pre-casts dt_bias to the core_attn_out dtype.
+    dt_bias = torch.randn((num_v_heads // tp_size),
+                          dtype=torch.float32,
+                          device=device)
+
+    prefill_batches = simple_random_distribute(num_actual_tokens, batch_size)
+    token_batches = prefill_batches.to(device)
+    perm = torch.randperm(token_batches.size(0)).to(device)
+    shuffled_tensor = token_batches[perm]
+    non_spec_query_start_loc = torch.cat([
+        torch.zeros([1], device=device),
+        torch.cumsum(shuffled_tensor, dim=0)
+    ]).to(torch.int32)
+    has_initial_state = torch.ones(batch_size,
+                                   dtype=torch.bool,
+                                   device=device)
+    non_spec_state_indices_tensor = torch.tensor(
+        random.sample(range(1, cache_batch_size), batch_size),
+        device=device,
+        dtype=torch.int32)
+
+    core_attn_out = torch.zeros(
+        (num_actual_tokens, num_v_heads // tp_size, head_v_dim),
+        dtype=torch.float32,
+        device=device,
+    )
+    # z is written by causal_conv1d in the activation dtype.
+    z = torch.empty((num_actual_tokens, num_v_heads // tp_size, head_v_dim),
+                    dtype=dtype,
+                    device=device)
+
+    intermediates = torch.ops._xpu_C.causal_conv1d_non_spec(
+        z,
+        projected_states_qkvz,
+        projected_states_ba,
+        num_k_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_state=conv_state,
+        conv_weights=conv_weights,
+        conv_bias=conv_bias,
+        activation=activation,
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
+        num_spec_decodes=0,
+        has_initial_state=has_initial_state,
+        non_spec_query_start_loc=non_spec_query_start_loc,
+        non_spec_token_indx=None,
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+        num_actual_tokens=num_actual_tokens,
+        tp_size=tp_size,
+        reorder_input=reorder_input)
+
+    torch.ops._xpu_C.gated_delta_rule_non_spec(
+        core_attn_out,
+        *intermediates,
+        num_v_heads,
+        head_v_dim,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        ssm_state=ssm_state,
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
+        num_spec_decodes=0,
+        has_initial_state=has_initial_state,
+        non_spec_query_start_loc=non_spec_query_start_loc,
+        non_spec_token_indx=None,
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+        num_actual_tokens=num_actual_tokens,
+        tp_size=tp_size)
+
+    ref_core_attn_out = torch.zeros_like(core_attn_out)
+    ref_z = torch.empty_like(z)
+
+    ref_gdn_attention(
+        ref_core_attn_out,
+        ref_z,
+        projected_states_qkvz,
+        projected_states_ba,
+        num_k_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_state=ref_conv_state,
+        ssm_state=ref_ssm_state,
+        conv_weights=conv_weights,
+        conv_bias=conv_bias,
+        activation=activation,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
+        has_initial_state=has_initial_state,
+        non_spec_query_start_loc=non_spec_query_start_loc,
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+        num_actual_tokens=num_actual_tokens,
+        tp_size=tp_size,
+        reorder_input=reorder_input,
+    )
+
+    atol = 5e-2
+    rtol = 5e-2
+
+    torch.testing.assert_close(z, ref_z, atol=atol, rtol=rtol)
     torch.testing.assert_close(core_attn_out,
                                ref_core_attn_out,
                                atol=atol,

@@ -49,11 +49,11 @@ act_softplus(float& x, float beta = 1.0f, float threshold = 20.0f) {
     return x;
 }
 
-template <typename T>
+template <typename OutT>
 CUTE_DEVICE void chunk_prepare_kernel(
     float* a,
     const float* A_log,
-    const T* dt_bias,
+    const OutT* dt_bias,
     const int* query_start_loc,
     const int total_virtual_seqlen,
     const int batch_size,
@@ -688,7 +688,7 @@ CUTE_DEVICE void chunk_inverse_opt_kernel(
   }
 }
 
-template <typename T, class TiledMMA>
+template <typename T, typename OutT, class TiledMMA>
 CUTE_DEVICE void chunk_compute_wu_kernel(
     const sycl::local_accessor<float, 1>& slm_mem_const,
     T* A,
@@ -700,7 +700,7 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
     const float* b,
     const float* a,
     const float* A_log,
-    const T* dt_bias,
+    const OutT* dt_bias,
     const int* query_start_loc,
     const bool* has_initial_state,
     const int total_virtual_seqlen,
@@ -881,10 +881,10 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
   }
 }
 
-template <typename T, typename StateT, class TiledMMA>
+template <typename T, typename StateT, typename OutT, class TiledMMA>
 CUTE_DEVICE void chunk_fwd_o_kernel(
     const sycl::local_accessor<float, 1>& slm_mem_const,  // [3 * chunk_size]
-    T* core_attn_out,  // [total_seqlen, num_v_heads, head_v_dim]
+    OutT* core_attn_out,  // [total_seqlen, num_v_heads, head_v_dim]
     T* A,  // [num_v_heads, total_virtual_seqlen, chunk_size], temp O2 buffer
     T* w,  // [num_v_heads, total_virtual_seqlen, head_k_dim]
     T* u,  // [num_v_heads, total_virtual_seqlen, head_v_dim]
@@ -1230,28 +1230,30 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
   }
 }
 
-template <typename T, typename StateTag>
+// The tag carries OutT so that each (T, StateT, OutT) launcher
+// instantiation registers a distinct SYCL kernel name.
+template <typename T, typename StateTag, typename OutTag>
 class ChunkPrepareKernel;
 
-template <typename T, typename StateTag>
+template <typename T, typename StateTag, typename OutTag>
 class ChunkComputeAKernel;
 
-template <typename T, typename StateTag>
+template <typename T, typename StateTag, typename OutTag>
 class ChunkInverseOptKernel;
 
-template <typename T, typename StateTag>
+template <typename T, typename StateTag, typename OutTag>
 class ChunkInverseKernel;
 
-template <typename T, typename StateTag>
+template <typename T, typename StateTag, typename OutTag>
 class ChunkComputeWUKernel;
 
-template <typename T, typename StateT>
+template <typename T, typename StateT, typename OutT>
 class ChunkFwdOKernel;
 
-template <typename T, typename StateT>
+template <typename T, typename StateT, typename OutT>
 void kernel_launcher(
     sycl::queue& queue,
-    T* core_attn_out,
+    OutT* core_attn_out,
     const T* q,
     const T* k,
     const T* v,
@@ -1261,7 +1263,7 @@ void kernel_launcher(
     const float* b,
     float* a,
     const float* A_log,
-    const T* dt_bias,
+    const OutT* dt_bias,
     StateT* ssm_state,
     const int ssm_state_stride_0,
     const int* query_start_loc,
@@ -1294,11 +1296,11 @@ void kernel_launcher(
   int slm_size_prepare = num_v_heads * 2 + chunk_size;
 
   queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for<ChunkPrepareKernel<T, StateT>>(
+    cgh.parallel_for<ChunkPrepareKernel<T, StateT, OutT>>(
         sycl::nd_range<3>{global_prepare * local_prepare, local_prepare},
         kernel_props,
         [=](auto) {
-          chunk_prepare_kernel<T>(
+          chunk_prepare_kernel<OutT>(
               a,
               A_log,
               dt_bias,
@@ -1327,7 +1329,7 @@ void kernel_launcher(
   queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_mem(
         sycl::range<1>(slm_size_compute_A), cgh);
-    cgh.parallel_for<ChunkComputeAKernel<T, StateT>>(
+    cgh.parallel_for<ChunkComputeAKernel<T, StateT, OutT>>(
         sycl::nd_range<3>{global_compute_A * local_compute_A, local_compute_A},
         kernel_props,
         [=](auto) {
@@ -1367,7 +1369,7 @@ void kernel_launcher(
         1);
 
     queue.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for<ChunkInverseOptKernel<T, StateT>>(
+      cgh.parallel_for<ChunkInverseOptKernel<T, StateT, OutT>>(
           sycl::nd_range<3>{global_inverse * local_inverse, local_inverse},
           kernel_props,
           [=](auto) {
@@ -1395,7 +1397,7 @@ void kernel_launcher(
     queue.submit([&](sycl::handler& cgh) {
       sycl::local_accessor<float, 1> local_mem(
           sycl::range<1>(slm_size_inverse), cgh);
-      cgh.parallel_for<ChunkInverseKernel<T, StateT>>(
+      cgh.parallel_for<ChunkInverseKernel<T, StateT, OutT>>(
           sycl::nd_range<3>{global_inverse * local_inverse, local_inverse},
           kernel_props,
           [=](auto) {
@@ -1430,12 +1432,12 @@ void kernel_launcher(
   queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_mem(
         sycl::range<1>(slm_size_compute_wu), cgh);
-    cgh.parallel_for<ChunkComputeWUKernel<T, StateT>>(
+    cgh.parallel_for<ChunkComputeWUKernel<T, StateT, OutT>>(
         sycl::nd_range<3>{
             global_compute_wu * local_compute_wu, local_compute_wu},
         kernel_props,
         [=](auto) {
-          chunk_compute_wu_kernel<T, MMAComputeWU>(
+          chunk_compute_wu_kernel<T, OutT, MMAComputeWU>(
               local_mem,
               A,
               w,
@@ -1474,11 +1476,11 @@ void kernel_launcher(
   queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_mem(
         sycl::range<1>(slm_size_fwd_o), cgh);
-    cgh.parallel_for<ChunkFwdOKernel<T, StateT>>(
+    cgh.parallel_for<ChunkFwdOKernel<T, StateT, OutT>>(
         sycl::nd_range<3>{global_fwd_o * local_fwd_o, local_fwd_o},
         kernel_props,
         [=](auto) {
-          chunk_fwd_o_kernel<T, StateT, MMAFwdO>(
+          chunk_fwd_o_kernel<T, StateT, OutT, MMAFwdO>(
               local_mem,
               core_attn_out,
               A,
@@ -1546,31 +1548,46 @@ void chunk_gated_delta_rule_impl_xe2(
       A_log.scalar_type());
   TORCH_CHECK(
       dt_bias.scalar_type() == core_attn_out.scalar_type(),
-      "dt_bias dtype must match core_attn_out dtype (float16/bfloat16), but "
-      "got dt_bias=",
+      "dt_bias dtype must match core_attn_out dtype "
+      "(float16/bfloat16/float32), but got dt_bias=",
       dt_bias.scalar_type(),
       ", core_attn_out=",
       core_attn_out.scalar_type());
+  // q/k/v share the operand dtype: the A/w/u buffers and every 16-bit
+  // pointer in the launcher are typed from it. A/w/u are always allocated
+  // in q.dtype(), so a mismatch would be silently misinterpreted by the
+  // kernels.
+  TORCH_CHECK(
+      q.scalar_type() == k.scalar_type() && q.scalar_type() == v.scalar_type(),
+      "q/k/v must share one dtype, but got q=",
+      q.scalar_type(),
+      " k=",
+      k.scalar_type(),
+      " v=",
+      v.scalar_type());
 
-  auto dtype = core_attn_out.dtype();
+  // Intermediate buffers are operand-level: they track the q/k/v dtype, while
+  // core_attn_out may be widened (e.g. fp32 out + fp16 ops) to avoid a
+  // low-precision readout of an unnormalized SSM state.
+  auto operand_dtype = q.dtype();
   auto device = core_attn_out.device();
 
   int padding_size = batch_size * (chunk_size - 1);
 
   torch::Tensor A = torch::zeros(
       {num_v_heads, total_seqlen + padding_size, chunk_size},
-      torch::dtype(dtype).device(device).requires_grad(false));
+      torch::dtype(operand_dtype).device(device).requires_grad(false));
   torch::Tensor w = torch::zeros(
       {num_v_heads, total_seqlen + padding_size, head_k_dim},
-      torch::dtype(dtype).device(device).requires_grad(false));
+      torch::dtype(operand_dtype).device(device).requires_grad(false));
   torch::Tensor u = torch::zeros(
       {num_v_heads, total_seqlen + padding_size, head_v_dim},
-      torch::dtype(dtype).device(device).requires_grad(false));
+      torch::dtype(operand_dtype).device(device).requires_grad(false));
 
-#define KERNEL_LAUNCHER(scalar_t, state_scalar_t)                  \
-  kernel_launcher<scalar_t, state_scalar_t>(                       \
+#define KERNEL_LAUNCHER(scalar_t, state_scalar_t, out_scalar_t)    \
+  kernel_launcher<scalar_t, state_scalar_t, out_scalar_t>(         \
       queue,                                                       \
-      reinterpret_cast<scalar_t*>(core_attn_out.data_ptr()),       \
+      reinterpret_cast<out_scalar_t*>(core_attn_out.data_ptr()),   \
       reinterpret_cast<scalar_t*>(q.data_ptr()),                   \
       reinterpret_cast<scalar_t*>(k.data_ptr()),                   \
       reinterpret_cast<scalar_t*>(v.data_ptr()),                   \
@@ -1580,7 +1597,7 @@ void chunk_gated_delta_rule_impl_xe2(
       reinterpret_cast<float*>(b.data_ptr()),                      \
       reinterpret_cast<float*>(a.data_ptr()),                      \
       reinterpret_cast<float*>(A_log.data_ptr()),                  \
-      reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),             \
+      reinterpret_cast<out_scalar_t*>(dt_bias.data_ptr()),         \
       reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),     \
       ssm_state_stride_0,                                          \
       reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
@@ -1596,17 +1613,17 @@ void chunk_gated_delta_rule_impl_xe2(
       num_v_heads,                                                 \
       head_v_dim);
 
-#define DISPATCH_STATE_DTYPE(scalar_t)                                  \
+#define DISPATCH_STATE_DTYPE(scalar_t, out_scalar_t)                    \
   do {                                                                  \
     if (ssm_state.scalar_type() == at::kFloat) {                        \
       using state_scalar_t = float;                                     \
-      KERNEL_LAUNCHER(scalar_t, state_scalar_t)                         \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t, out_scalar_t)           \
     } else if (ssm_state.scalar_type() == at::kBFloat16) {              \
       using state_scalar_t = bfloat16_t;                                \
-      KERNEL_LAUNCHER(scalar_t, state_scalar_t)                         \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t, out_scalar_t)           \
     } else if (ssm_state.scalar_type() == at::kHalf) {                  \
       using state_scalar_t = half_t;                                    \
-      KERNEL_LAUNCHER(scalar_t, state_scalar_t)                         \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t, out_scalar_t)           \
     } else {                                                            \
       TORCH_CHECK(                                                      \
           false,                                                        \
@@ -1616,15 +1633,43 @@ void chunk_gated_delta_rule_impl_xe2(
   } while (0)
 
   if (core_attn_out.scalar_type() == at::kBFloat16) {
+    TORCH_CHECK(
+        q.scalar_type() == at::kBFloat16,
+        "core_attn_out must match the q/k/v dtype when it is bfloat16, "
+        "but got core_attn_out=bfloat16 q=",
+        q.scalar_type());
     using scalar_t = bfloat16_t;
-    DISPATCH_STATE_DTYPE(scalar_t);
+    using out_scalar_t = bfloat16_t;
+    DISPATCH_STATE_DTYPE(scalar_t, out_scalar_t);
   } else if (core_attn_out.scalar_type() == at::kHalf) {
+    TORCH_CHECK(
+        q.scalar_type() == at::kHalf,
+        "core_attn_out must match the q/k/v dtype when it is float16, "
+        "but got core_attn_out=float16 q=",
+        q.scalar_type());
     using scalar_t = half_t;
-    DISPATCH_STATE_DTYPE(scalar_t);
+    using out_scalar_t = half_t;
+    DISPATCH_STATE_DTYPE(scalar_t, out_scalar_t);
+  } else if (core_attn_out.scalar_type() == at::kFloat) {
+    if (q.scalar_type() == at::kBFloat16) {
+      using scalar_t = bfloat16_t;
+      using out_scalar_t = float;
+      DISPATCH_STATE_DTYPE(scalar_t, out_scalar_t);
+    } else if (q.scalar_type() == at::kHalf) {
+      using scalar_t = half_t;
+      using out_scalar_t = float;
+      DISPATCH_STATE_DTYPE(scalar_t, out_scalar_t);
+    } else {
+      TORCH_CHECK(
+          false,
+          "q/k/v dtype must be float16/bfloat16 with a float32 "
+          "core_attn_out, but got ",
+          q.scalar_type());
+    }
   } else {
     TORCH_CHECK(
         false,
-        "core_attn_out dtype must be float16/bfloat16, but got ",
+        "core_attn_out dtype must be float16/bfloat16/float32, but got ",
         core_attn_out.scalar_type());
   }
 
