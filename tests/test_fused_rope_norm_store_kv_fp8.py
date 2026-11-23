@@ -10,6 +10,7 @@ import pytest
 import torch
 
 import vllm_xpu_kernels._xpu_C  # noqa: F401 - registers torch.ops._xpu_C ops
+from tests.utils import opcheck
 
 DEVICE = "xpu"
 FP8_MAX = torch.finfo(torch.float8_e4m3fn).max  # 448.0
@@ -152,6 +153,7 @@ CONFIGS = [
     (4, 32, 4, 2, True),     # NORM_THEN_ROPE, FP8
     (4, 16, 4, 0, False),    # No norm, no FP8 (bf16 passthrough)
     (32, 32, 8, 1, True),    # Larger batch, GQA=4, ROPE_THEN_NORM
+    (4, 64, 4, 2, True),     # GQA=16, NORM_THEN_ROPE, FP8
 ]
 
 
@@ -165,22 +167,25 @@ CONFIGS = [
         "t4_h32kv4_normrope_fp8",
         "t4_h16kv4_nonorm_bf16",
         "t32_h32kv8_ropenorm_fp8",
+        "t4_h64kv4_normrope_fp8",
     ],
 )
 @pytest.mark.parametrize("missing_norm", [None, "q", "k"])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("kv_scales", [(1.0, 1.0), (0.5, 2.0)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("seed", [42])
 @torch.inference_mode()
 def test_fused_rope_norm_store_kv_fp8(
     num_tokens, num_heads, num_kv_heads, qk_norm_policy, use_fp8,
-    missing_norm, dtype, seed,
+    missing_norm, kv_scales, dtype, seed,
 ):
     if missing_norm is not None and qk_norm_policy == 0:
         pytest.skip("norm weights are unused without a norm policy")
     torch.manual_seed(seed)
 
     q_per_kv = num_heads // num_kv_heads
-    assert q_per_kv in (4, 8), f"Unsupported GQA ratio: {q_per_kv}"
+    assert q_per_kv in ((4, 8, 16) if use_fp8 else (4, 8)), (
+        f"Unsupported GQA ratio: {q_per_kv}")
 
     q_size = num_heads * HEAD_DIM
     kv_size = num_kv_heads * HEAD_DIM
@@ -206,8 +211,7 @@ def test_fused_rope_norm_store_kv_fp8(
     slot_mapping = torch.arange(num_tokens, dtype=torch.long, device="cpu")
 
     # Scales
-    k_scale_val = 1.0
-    v_scale_val = 1.0
+    k_scale_val, v_scale_val = kv_scales
     k_scale = torch.tensor([k_scale_val], dtype=torch.float32, device="cpu")
     v_scale = torch.tensor([v_scale_val], dtype=torch.float32, device="cpu")
 
@@ -299,6 +303,10 @@ def test_fused_rope_norm_store_kv_fp8(
             assert max_diff <= 1, (
                 f"{name} cache FP8 mismatch: max ULP diff = {max_diff}")
     else:
+        # Q is not quantized, so its scales are the identity.
+        torch.testing.assert_close(
+            q_scale_kernel.cpu(), torch.ones(num_tokens, num_heads))
+
         # bf16 path: both reference and kernel store as bf16.
         # Difference comes only from FMA/reduction order in fp32
         # straddling a bf16 bucket boundary → at most 1 ULP of bf16.
@@ -323,6 +331,94 @@ def test_fused_rope_norm_store_kv_fp8(
 
     print(f"  PASSED: tokens={num_tokens}, heads={num_heads}/"
           f"{num_kv_heads}, norm={qk_norm_policy}, fp8={use_fp8}")
+
+
+@torch.inference_mode()
+def test_fused_rope_norm_store_kv_fp8_opcheck():
+    num_tokens, num_heads, num_kv_heads = 4, 16, 4
+    total_dim = (num_heads + 2 * num_kv_heads) * HEAD_DIM
+    qkv = torch.randn(num_tokens, total_dim, dtype=torch.bfloat16,
+                      device=DEVICE)
+    positions = torch.arange(num_tokens, dtype=torch.long, device=DEVICE)
+    cos_sin_cache = _build_cos_sin_cache(MAX_POS, HEAD_DIM, device=DEVICE)
+    key_cache = torch.zeros(2, BLOCK_SIZE, num_kv_heads, HEAD_DIM,
+                            dtype=torch.uint8, device=DEVICE)
+    value_cache = torch.zeros_like(key_cache)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=DEVICE)
+    out_q = torch.zeros(num_tokens, num_heads, HEAD_DIM, dtype=torch.uint8,
+                        device=DEVICE)
+    scale = torch.ones(1, dtype=torch.float32, device=DEVICE)
+    weight = torch.ones(HEAD_DIM, dtype=torch.float32, device=DEVICE)
+
+    # The op returns a new tensor and has no fake impl, so only check the
+    # schema (e.g. qkv is read-only) and autograd registration.
+    opcheck(torch.ops._xpu_C.fused_rope_norm_store_kv_fp8,
+            (qkv, cos_sin_cache, positions, key_cache, value_cache,
+             slot_mapping, out_q, num_heads, num_kv_heads, HEAD_DIM, scale,
+             scale, weight, weight, 1, True),
+            test_utils=("test_schema", "test_autograd_registration"))
+
+
+@pytest.mark.parametrize("bad", [
+    "num_kv_heads", "gqa", "out_q_dtype", "cache_dtype", "norm_weight",
+])
+@torch.inference_mode()
+def test_invalid_inputs_rejected(bad):
+    num_tokens, num_heads, num_kv_heads = 4, 16, 4
+    total_dim = (num_heads + 2 * num_kv_heads) * HEAD_DIM
+    qkv = torch.randn(num_tokens, total_dim, dtype=torch.bfloat16,
+                      device=DEVICE)
+    positions = torch.arange(num_tokens, dtype=torch.long, device=DEVICE)
+    cos_sin_cache = _build_cos_sin_cache(MAX_POS, HEAD_DIM, device=DEVICE)
+    cache_dtype = torch.uint8
+    out_q_dtype = torch.bfloat16
+    use_fp8 = False
+    weight = None
+    if bad == "num_kv_heads":
+        num_kv_heads = 0
+    elif bad == "gqa":
+        num_heads = 15
+    elif bad == "out_q_dtype":
+        cache_dtype = torch.bfloat16
+        out_q_dtype = torch.uint8
+    elif bad == "cache_dtype":
+        pass  # 1-byte caches with use_fp8=False would overflow by 2x.
+    elif bad == "norm_weight":
+        cache_dtype = torch.bfloat16
+        weight = torch.ones(HEAD_DIM // 2, dtype=torch.float32, device=DEVICE)
+    key_cache = torch.zeros(2, BLOCK_SIZE, 4, HEAD_DIM, dtype=cache_dtype,
+                            device=DEVICE)
+    value_cache = torch.zeros_like(key_cache)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=DEVICE)
+    out_q = torch.zeros(num_tokens, 16, HEAD_DIM, dtype=out_q_dtype,
+                        device=DEVICE)
+    scale = torch.ones(1, dtype=torch.float32, device=DEVICE)
+
+    with pytest.raises(RuntimeError):
+        torch.ops._xpu_C.fused_rope_norm_store_kv_fp8(
+            qkv, cos_sin_cache, positions, key_cache, value_cache,
+            slot_mapping, out_q, num_heads, num_kv_heads, HEAD_DIM, scale,
+            scale, weight, weight, 1 if weight is not None else 0, use_fp8)
+
+
+@torch.inference_mode()
+def test_zero_tokens():
+    num_heads, num_kv_heads = 16, 4
+    total_dim = (num_heads + 2 * num_kv_heads) * HEAD_DIM
+    qkv = torch.empty(0, total_dim, dtype=torch.bfloat16, device=DEVICE)
+    empty_long = torch.empty(0, dtype=torch.long, device=DEVICE)
+    cos_sin_cache = _build_cos_sin_cache(MAX_POS, HEAD_DIM, device=DEVICE)
+    key_cache = torch.zeros(2, BLOCK_SIZE, num_kv_heads, HEAD_DIM,
+                            dtype=torch.uint8, device=DEVICE)
+    value_cache = torch.zeros_like(key_cache)
+    out_q = torch.empty(0, num_heads, HEAD_DIM, dtype=torch.uint8,
+                        device=DEVICE)
+    scale = torch.ones(1, dtype=torch.float32, device=DEVICE)
+    q_scale = torch.ops._xpu_C.fused_rope_norm_store_kv_fp8(
+        qkv, cos_sin_cache, empty_long, key_cache, value_cache, empty_long,
+        out_q, num_heads, num_kv_heads, HEAD_DIM, scale, scale, None, None,
+        0, True)
+    assert q_scale.shape == (0, num_heads)
 
 
 @torch.inference_mode()

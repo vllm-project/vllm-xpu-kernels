@@ -132,7 +132,7 @@ void fused_kv_compress_norm_rope_insert_sparse_attn(
     int64_t scale_dim,
     int64_t kv_block_stride);
 torch::Tensor fused_rope_norm_store_kv_fp8(
-    torch::Tensor& qkv,
+    const torch::Tensor& qkv,
     const torch::Tensor& cos_sin_cache,
     const torch::Tensor& positions,
     torch::Tensor& key_cache,

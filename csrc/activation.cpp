@@ -970,10 +970,16 @@ void silu_and_mul_with_clamp(
         auto input_ptr = input.data_ptr<scalar_t>();
         at::DeviceGuard device_guard(input.device());
         auto& queue = vllm::xpu::vllmGetQueue();
-        // Widest vector that still divides d (see act_and_mul note): this op
-        // is purely memory bound, so wide access maximizes HBM bandwidth.
+        // Widest vector that still divides d and keeps both pointers aligned
+        // (see act_and_mul note): this op is purely memory bound, so wide
+        // access maximizes HBM bandwidth.
         int vec_size = static_cast<int>(sizeof(float) * 4 / sizeof(scalar_t));
-        while (vec_size > 1 && d % vec_size != 0) {
+        auto aligned = [&](int n) {
+          const uintptr_t bytes = n * sizeof(scalar_t);
+          return reinterpret_cast<uintptr_t>(out_ptr) % bytes == 0 &&
+                 reinterpret_cast<uintptr_t>(input_ptr) % bytes == 0;
+        };
+        while (vec_size > 1 && (d % vec_size != 0 || !aligned(vec_size))) {
           vec_size = vec_size >> 1;
         }
         const int64_t wg_size = std::min(
@@ -983,7 +989,6 @@ void silu_and_mul_with_clamp(
           VEC_LAUNCH_SILU_AND_MUL_WITH_CLAMP(2);
           VEC_LAUNCH_SILU_AND_MUL_WITH_CLAMP(4);
           VEC_LAUNCH_SILU_AND_MUL_WITH_CLAMP(8);
-          VEC_LAUNCH_SILU_AND_MUL_WITH_CLAMP(16);
           default:
             TORCH_CHECK(false, "Unsupported vector size: ", vec_size);
         }

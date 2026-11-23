@@ -52,22 +52,18 @@ inline void apply_token_rotary_embedding(
     output[x_index] = static_cast<scalar_t>(x * cos - y * sin);
     output[y_index] = static_cast<scalar_t>(y * cos + x * sin);
   } else {
-    // GPT-J style: interleaved [x0, y0, x1, y1, ...].
-    // Use vec2 to load/rotate/store a pair in one shot.
-    using v2_type = sycl::vec<scalar_t, 2>;
-    const auto* input_v2 = reinterpret_cast<const v2_type*>(input);
-    auto* output_v2 = reinterpret_cast<v2_type*>(output);
-
-    const v2_type t = input_v2[rot_offset];
+    // GPT-J style: interleaved [x0, y0, x1, y1, ...]. Callers may pass odd
+    // head/token strides, so a pair is only element aligned: use scalar
+    // accesses.
+    const int x_index = 2 * rot_offset;
+    const int y_index = x_index + 1;
     using acc_t = rotary_acc_t<scalar_t>;
     const acc_t c = static_cast<acc_t>(cos_ptr[rot_offset]);
     const acc_t s = static_cast<acc_t>(sin_ptr[rot_offset]);
-    output_v2[rot_offset] = {
-        static_cast<scalar_t>(
-            static_cast<acc_t>(t[0]) * c - static_cast<acc_t>(t[1]) * s),
-        static_cast<scalar_t>(
-            static_cast<acc_t>(t[1]) * c + static_cast<acc_t>(t[0]) * s),
-    };
+    const acc_t x = static_cast<acc_t>(input[x_index]);
+    const acc_t y = static_cast<acc_t>(input[y_index]);
+    output[x_index] = static_cast<scalar_t>(x * c - y * s);
+    output[y_index] = static_cast<scalar_t>(y * c + x * s);
   }
 }
 

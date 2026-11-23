@@ -64,8 +64,8 @@ namespace {
 
 bool use_inv_rope_asm(const at::Device& device) {
   const bool enabled = [&] {
-    if (!vllm::xpu::is_xe3p_arch(
-            static_cast<at::DeviceIndex>(device.index()))) {
+    if (!device.is_xpu() || !vllm::xpu::is_xe3p_arch_cached(
+                                device.has_index() ? device.index() : -1)) {
       return false;
     }
 

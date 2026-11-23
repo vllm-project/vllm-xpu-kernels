@@ -686,14 +686,15 @@ void deepseek_qnorm_rope_kv_insert(
   const int64_t kv_stride_token = kv.stride(0);
   const int64_t cache_stride_pos = cos_sin_cache.stride(0);
 
-  at::DeviceGuard device_guard(q.device());
-  auto& q_xpu = vllm::xpu::vllmGetQueue();
-
   TORCH_CHECK(
       kv_cache_dtype == "bf16" || kv_cache_dtype == "fp8_ds_mla",
       "deepseek_qnorm_rope_kv_insert: unsupported kv_cache_dtype '",
       kv_cache_dtype,
       "', expected 'bf16' or 'fp8_ds_mla'");
+  if (num_tokens == 0) return;
+
+  at::DeviceGuard device_guard(q.device());
+  auto& q_xpu = vllm::xpu::vllmGetQueue();
 
   auto* q_ptr = reinterpret_cast<bf16_t*>(q.data_ptr());
   auto* kv_ptr = reinterpret_cast<const bf16_t*>(kv.data_ptr());
@@ -726,7 +727,7 @@ void deepseek_qnorm_rope_kv_insert(
           cache_block_stride,
           cache_stride_pos);
     };
-    if (vllm::xpu::is_xe3p_arch(q.device().index())) {
+    if (vllm::xpu::is_xe3p_arch_cached(q.device().index())) {
       run(std::integral_constant<int, 32>{});
     } else {
       run(std::integral_constant<int, 16>{});

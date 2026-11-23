@@ -155,7 +155,7 @@ class fused_rope_norm_store_kv_fp8_kernel {
     const int q_size = num_q_heads_ * HEAD_DIM;
     const int kv_size = num_kv_heads_ * HEAD_DIM;
     const int qkv_stride = q_size + 2 * kv_size;
-    const int qkv_token_base = token_idx * qkv_stride;
+    const int64_t qkv_token_base = static_cast<int64_t>(token_idx) * qkv_stride;
     const int q_head_start = kv_head * Q_PER_KV;
 
     const int half_dim = HEAD_DIM / 2;
@@ -174,7 +174,7 @@ class fused_rope_norm_store_kv_fp8_kernel {
 
       // Load Q head from global memory.
       float elems[ELEMS];
-      const int q_offset = qkv_token_base + head * HEAD_DIM + lane_offset;
+      const int64_t q_offset = qkv_token_base + head * HEAD_DIM + lane_offset;
 #pragma unroll
       for (int i = 0; i < ELEMS; i++) {
         elems[i] = static_cast<float>(qkv_[q_offset + i]);
@@ -204,7 +204,7 @@ class fused_rope_norm_store_kv_fp8_kernel {
     // ==========================================================
     {
       float elems[ELEMS];
-      const int k_offset =
+      const int64_t k_offset =
           qkv_token_base + q_size + kv_head * HEAD_DIM + lane_offset;
 #pragma unroll
       for (int i = 0; i < ELEMS; i++) {
@@ -234,7 +234,7 @@ class fused_rope_norm_store_kv_fp8_kernel {
     // ==========================================================
     {
       float elems[ELEMS];
-      const int v_offset =
+      const int64_t v_offset =
           qkv_token_base + q_size + kv_size + kv_head * HEAD_DIM + lane_offset;
 #pragma unroll
       for (int i = 0; i < ELEMS; i++) {
@@ -312,8 +312,10 @@ class fused_rope_norm_store_kv_fp8_kernel {
         q_scale_out_[token_idx * num_q_heads_ + head_idx] = scale;
       }
 
-      const int out_off =
-          (token_idx * num_q_heads_ + head_idx) * HEAD_DIM + lane * ELEMS;
+      const int64_t out_off =
+          (static_cast<int64_t>(token_idx) * num_q_heads_ + head_idx) *
+              HEAD_DIM +
+          lane * ELEMS;
       uint32_t packed = 0;
 #pragma unroll
       for (int i = 0; i < ELEMS; i++) {
@@ -325,8 +327,10 @@ class fused_rope_norm_store_kv_fp8_kernel {
       }
       *reinterpret_cast<uint32_t*>(out_q_ + out_off) = packed;
     } else {
-      const int out_off =
-          (token_idx * num_q_heads_ + head_idx) * HEAD_DIM + lane * ELEMS;
+      const int64_t out_off =
+          (static_cast<int64_t>(token_idx) * num_q_heads_ + head_idx) *
+              HEAD_DIM +
+          lane * ELEMS;
       auto* dst = reinterpret_cast<scalar_t*>(out_q_) + out_off;
 #pragma unroll
       for (int i = 0; i < ELEMS; i++) {
@@ -495,7 +499,7 @@ void launch_fused_rope_norm_store_kv_fp8(
 }  // namespace vllm
 
 torch::Tensor fused_rope_norm_store_kv_fp8(
-    torch::Tensor& qkv,
+    const torch::Tensor& qkv,
     const torch::Tensor& cos_sin_cache,
     const torch::Tensor& positions,
     torch::Tensor& key_cache,
@@ -511,29 +515,70 @@ torch::Tensor fused_rope_norm_store_kv_fp8(
     std::optional<torch::Tensor> k_norm_weight,
     int64_t qk_norm_policy,
     bool use_fp8) {
-  const at::DeviceGuard device_guard(qkv.device());
-
   CHECK_DEVICE(qkv);
-  CHECK_DEVICE(cos_sin_cache);
-  CHECK_DEVICE(positions);
-  CHECK_DEVICE(key_cache);
-  CHECK_DEVICE(value_cache);
-  CHECK_DEVICE(slot_mapping);
-  CHECK_DEVICE(out_q);
-  CHECK_DEVICE(k_scale);
-  CHECK_DEVICE(v_scale);
+  const auto device = qkv.device();
+  auto check_same_device = [&](const torch::Tensor& t, const char* name) {
+    TORCH_CHECK(
+        t.device() == device, name, " must be on the same device as qkv");
+  };
+  check_same_device(cos_sin_cache, "cos_sin_cache");
+  check_same_device(positions, "positions");
+  check_same_device(key_cache, "key_cache");
+  check_same_device(value_cache, "value_cache");
+  check_same_device(slot_mapping, "slot_mapping");
+  check_same_device(out_q, "out_q");
+  check_same_device(k_scale, "k_scale");
+  check_same_device(v_scale, "v_scale");
 
-  const int num_tokens = qkv.size(0);
-  TORCH_CHECK(qkv.dim() == 2, "qkv must be 2D");
   TORCH_CHECK(
       head_dim == 128, "Only head_dim=128 is supported, got ", head_dim);
   TORCH_CHECK(
-      key_cache.dim() == 4,
-      "key_cache must be 4D [num_blocks, block_size, num_kv_heads, head_dim]");
+      num_kv_heads > 0 && num_q_heads > 0 && num_q_heads % num_kv_heads == 0,
+      "num_q_heads must be a positive multiple of num_kv_heads, got ",
+      num_q_heads,
+      " and ",
+      num_kv_heads);
   TORCH_CHECK(
-      value_cache.dim() == 4,
-      "value_cache must be 4D [num_blocks, block_size, num_kv_heads, "
-      "head_dim]");
+      qkv.dim() == 2 && qkv.is_contiguous(), "qkv must be 2D contiguous");
+  const int64_t num_tokens = qkv.size(0);
+  TORCH_CHECK(
+      qkv.size(1) == (num_q_heads + 2 * num_kv_heads) * head_dim,
+      "qkv must be [num_tokens, (num_q_heads + 2 * num_kv_heads) * head_dim]");
+  TORCH_CHECK(
+      positions.scalar_type() == torch::kInt64 && positions.is_contiguous() &&
+          positions.numel() == num_tokens,
+      "positions must be contiguous int64 [num_tokens]");
+  TORCH_CHECK(
+      slot_mapping.scalar_type() == torch::kInt64 &&
+          slot_mapping.is_contiguous() && slot_mapping.numel() == num_tokens,
+      "slot_mapping must be contiguous int64 [num_tokens]");
+  TORCH_CHECK(
+      cos_sin_cache.scalar_type() == torch::kFloat32 &&
+          cos_sin_cache.dim() == 2 && cos_sin_cache.size(1) == head_dim &&
+          cos_sin_cache.is_contiguous(),
+      "cos_sin_cache must be contiguous float32 [max_position, head_dim]");
+  TORCH_CHECK(
+      k_scale.scalar_type() == torch::kFloat32 && k_scale.numel() >= 1 &&
+          v_scale.scalar_type() == torch::kFloat32 && v_scale.numel() >= 1,
+      "k_scale and v_scale must be float32 with at least one element");
+
+  // FP8 outputs are one byte per element, otherwise they match qkv.
+  const int64_t out_elem_size = use_fp8 ? 1 : qkv.element_size();
+  TORCH_CHECK(
+      out_q.is_contiguous() &&
+          out_q.numel() == num_tokens * num_q_heads * head_dim &&
+          (use_fp8 ? out_q.element_size() == 1
+                   : out_q.scalar_type() == qkv.scalar_type()),
+      "out_q must be contiguous [num_tokens, num_q_heads, head_dim] of ",
+      use_fp8 ? "a 1-byte FP8 type" : "qkv's dtype");
+  TORCH_CHECK(
+      key_cache.dim() == 4 && key_cache.size(1) > 0 &&
+          key_cache.size(2) == num_kv_heads && key_cache.size(3) == head_dim &&
+          key_cache.stride(3) == 1 && key_cache.element_size() == out_elem_size,
+      "key_cache must be [num_blocks, block_size, num_kv_heads, head_dim] "
+      "with a contiguous last dim and ",
+      out_elem_size,
+      "-byte elements");
   // The kernel addresses both caches with key_cache's layout.
   TORCH_CHECK(
       value_cache.sizes() == key_cache.sizes() &&
@@ -541,27 +586,35 @@ torch::Tensor fused_rope_norm_store_kv_fp8(
           value_cache.element_size() == key_cache.element_size(),
       "key_cache and value_cache must have the same shape, strides and "
       "element size");
-  TORCH_CHECK(
-      cos_sin_cache.scalar_type() == torch::kFloat32,
-      "cos_sin_cache must be float32");
-  TORCH_CHECK(
-      positions.scalar_type() == torch::kInt64, "positions must be int64");
 
-  auto q_scale_out = torch::empty(
-      {num_tokens, num_q_heads},
-      torch::TensorOptions().dtype(torch::kFloat32).device(qkv.device()));
+  auto check_norm_weight = [&](const std::optional<torch::Tensor>& w,
+                               const char* name) -> const float* {
+    if (!w.has_value() || !w->defined()) return nullptr;
+    check_same_device(*w, name);
+    TORCH_CHECK(
+        w->scalar_type() == torch::kFloat32 && w->is_contiguous() &&
+            w->numel() == head_dim,
+        name,
+        " must be contiguous float32 [head_dim]");
+    return w->data_ptr<float>();
+  };
+  const float* q_norm_ptr = check_norm_weight(q_norm_weight, "q_norm_weight");
+  const float* k_norm_ptr = check_norm_weight(k_norm_weight, "k_norm_weight");
 
+  // Q is not quantized without FP8, so its scales are the identity.
+  auto q_scale_out =
+      use_fp8
+          ? torch::empty(
+                {num_tokens, num_q_heads},
+                torch::TensorOptions().dtype(torch::kFloat32).device(device))
+          : torch::ones(
+                {num_tokens, num_q_heads},
+                torch::TensorOptions().dtype(torch::kFloat32).device(device));
+  if (num_tokens == 0) return q_scale_out;
+
+  const at::DeviceGuard device_guard(device);
   const float* k_scale_ptr = k_scale.data_ptr<float>();
   const float* v_scale_ptr = v_scale.data_ptr<float>();
-
-  const float* q_norm_ptr = nullptr;
-  const float* k_norm_ptr = nullptr;
-  if (q_norm_weight.has_value() && q_norm_weight->defined()) {
-    q_norm_ptr = q_norm_weight->data_ptr<float>();
-  }
-  if (k_norm_weight.has_value() && k_norm_weight->defined()) {
-    k_norm_ptr = k_norm_weight->data_ptr<float>();
-  }
 
   VLLM_DISPATCH_HALF_TYPES(
       qkv.scalar_type(), "fused_rope_norm_store_kv_fp8", [&] {

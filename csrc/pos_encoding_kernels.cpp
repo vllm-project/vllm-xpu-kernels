@@ -339,8 +339,9 @@ bool try_launch_rotary_embedding_vec(
   const int64_t total_vecs = num_tokens * vecs_per_token;
   if (total_vecs <= 0) return false;
   // The kernel indexes with 32-bit math to keep the per-work-item divisions
-  // cheap; fall back to the reference kernel for anything larger.
-  if (total_vecs > std::numeric_limits<int>::max()) return false;
+  // cheap; fall back to the reference kernel when the padded global range
+  // would not fit in int.
+  if (total_vecs > std::numeric_limits<int>::max() - wg) return false;
 
   const size_t global =
       static_cast<size_t>((total_vecs + wg - 1) / wg) * static_cast<size_t>(wg);
