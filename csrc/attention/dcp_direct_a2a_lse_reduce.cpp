@@ -534,7 +534,6 @@ void direct_dcp_a2a_lse_reduce(
   auto& queue = vllm::xpu::vllmGetQueue();
   constexpr int64_t kExchangeThreads = 256;
   constexpr int64_t kCombineThreads = 256;
-  constexpr int64_t kCombineTargetGroups = 128;
   int64_t* epoch_ptr = epoch.data_ptr<int64_t>();
 
   vllm::xpu::sycl_kernel_submit(queue, 1, 1, IncrementEpoch{epoch_ptr});
@@ -580,15 +579,18 @@ void direct_dcp_a2a_lse_reduce(
       kExchangeThreads,
       SignalPeers{signal_ptrs, epoch_ptr, world_size, rank, signal_stride});
 
-  // Split each token's heads across groups only while the grid stays near
-  // kCombineTargetGroups, keeping small batches parallel without flooding
-  // the signal words with waiters.
+  // Split each token's heads across groups while the grid stays near
+  // combine_target_groups. Every group polls the same signal words, so small
+  // batches keep the grid small: on B60, 8 tokens drop from 17 to 15 us
+  // (DCP2) with 32 instead of 128 groups.
+  const int64_t combine_target_groups =
+      std::clamp<int64_t>(4 * num_tokens, 32, 128);
   const int64_t heads_per_group = std::min(
       heads_per_rank,
       std::max<int64_t>(
           1,
-          (num_tokens * heads_per_rank + kCombineTargetGroups - 1) /
-              kCombineTargetGroups));
+          (num_tokens * heads_per_rank + combine_target_groups - 1) /
+              combine_target_groups));
   const int64_t combine_groups =
       num_tokens * ((heads_per_rank + heads_per_group - 1) / heads_per_group);
   auto launch_combine = [&](auto scalar_tag) {
