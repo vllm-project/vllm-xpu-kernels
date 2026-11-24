@@ -265,7 +265,9 @@ std::vector<torch::Tensor> causal_conv1d_non_spec(
     const torch::Tensor& non_spec_state_indices_tensor,
     const int64_t num_actual_tokens,
     const int64_t tp_size,
-    const bool reorder_input);
+    const bool reorder_input,
+    const std::optional<torch::Tensor>& checkpoint_offsets,
+    const std::optional<torch::Tensor>& checkpoint_state_indices);
 
 void gated_delta_rule_spec(
     torch::Tensor& core_attn_out,
@@ -330,7 +332,9 @@ void gated_delta_rule_non_spec(
     const std::optional<torch::Tensor>& non_spec_token_indx,
     const torch::Tensor& non_spec_state_indices_tensor,
     const int64_t num_actual_tokens,
-    const int64_t tp_size);
+    const int64_t tp_size,
+    const std::optional<torch::Tensor>& checkpoint_offsets,
+    const std::optional<torch::Tensor>& checkpoint_state_indices);
 
 // Legacy fused entry point kept for API backward compatibility. Internally
 // chains causal_conv1d and gated_delta_rule to reproduce the original
@@ -364,7 +368,9 @@ void gdn_attention(
     const std::optional<torch::Tensor>& num_accepted_tokens,
     const int64_t num_actual_tokens,
     const int64_t tp_size,
-    const bool reorder_input);
+    const bool reorder_input,
+    const std::optional<torch::Tensor>& checkpoint_offsets,
+    const std::optional<torch::Tensor>& checkpoint_state_indices);
 #endif
 
 bool is_bmg_g21(int64_t device_index);

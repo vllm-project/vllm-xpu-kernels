@@ -234,7 +234,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "int num_prefills, int num_decodes, int num_spec_decodes, Tensor? "
       "has_initial_state, Tensor non_spec_query_start_loc, Tensor? "
       "non_spec_token_indx, Tensor non_spec_state_indices_tensor,"
-      "int num_actual_tokens, int tp_size, bool reorder_input) -> Tensor[]");
+      "int num_actual_tokens, int tp_size, bool reorder_input, "
+      "Tensor? checkpoint_offsets=None, Tensor? checkpoint_state_indices=None) "
+      "-> Tensor[]");
   xpu_ops.impl("causal_conv1d_non_spec", torch::kXPU, &causal_conv1d_non_spec);
 
   xpu_ops.def(
@@ -269,7 +271,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "int num_prefills, int num_decodes, int num_spec_decodes, Tensor? "
       "has_initial_state, Tensor non_spec_query_start_loc, Tensor? "
       "non_spec_token_indx, Tensor non_spec_state_indices_tensor,"
-      "int num_actual_tokens, int tp_size) -> ()");
+      "int num_actual_tokens, int tp_size, "
+      "Tensor? checkpoint_offsets=None, Tensor? checkpoint_state_indices=None) "
+      "-> ()");
   xpu_ops.impl(
       "gated_delta_rule_non_spec", torch::kXPU, &gated_delta_rule_non_spec);
 
@@ -285,7 +289,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor? non_spec_state_indices_tensor, Tensor? spec_query_start_loc, "
       "Tensor? spec_token_indx, Tensor? spec_state_indices_tensor, Tensor? "
       "num_accepted_tokens, int num_actual_tokens, int "
-      "tp_size, bool reorder_input) -> ()");
+      "tp_size, bool reorder_input, "
+      "Tensor? checkpoint_offsets=None, Tensor? checkpoint_state_indices=None) "
+      "-> ()");
   xpu_ops.impl("gdn_attention", torch::kXPU, &gdn_attention);
 #endif
 

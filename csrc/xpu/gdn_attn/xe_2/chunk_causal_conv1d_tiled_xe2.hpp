@@ -60,7 +60,9 @@ struct chunk_causal_conv1d_tiled_kernel {
       const int& conv_elems,
       const int& num_virtual_tokens,
       char* slm_data,
-      const bool fuse_l2norm)
+      const bool fuse_l2norm,
+      const int* checkpoint_offsets = nullptr,
+      const int* checkpoint_state_indices = nullptr)
       : q_out(q_out),
         k_out(k_out),
         v_out(v_out),
@@ -89,7 +91,9 @@ struct chunk_causal_conv1d_tiled_kernel {
         conv_elems(conv_elems),
         num_virtual_tokens(num_virtual_tokens),
         slm_data(slm_data),
-        fuse_l2norm(fuse_l2norm) {}
+        fuse_l2norm(fuse_l2norm),
+        checkpoint_offsets(checkpoint_offsets),
+        checkpoint_state_indices(checkpoint_state_indices) {}
 
   inline int lookup(int t) const { return token_indx ? token_indx[t] : t; }
 
@@ -595,6 +599,30 @@ struct chunk_causal_conv1d_tiled_kernel {
         }
       }
     }
+
+    // The tile holding the token that ends an internal prefill checkpoint
+    // writes that token's conv window into the checkpoint slot.
+    if (checkpoint_offsets != nullptr && seq_len > 1) {
+      const int ckpt_offset = checkpoint_offsets[batch_id];
+      const int ckpt_states_id = checkpoint_state_indices[batch_id];
+      const int ckpt_token = ckpt_offset - 1;
+      if (ckpt_offset > 0 && ckpt_states_id > pad_slot_id &&
+          ckpt_token >= tile_start_in_seq &&
+          ckpt_token < tile_start_in_seq + tile_tokens) {
+        T* st = conv_states +
+                static_cast<int64_t>(ckpt_states_id) * conv_states_strides.slot;
+        const int ckpt_slot = (ckpt_token - tile_start_in_seq) + (Width - 1);
+#pragma unroll
+        for (int i = 0; i < Width - 1; ++i) {
+          int slot = ckpt_slot - (Width - 2) + i;
+#pragma unroll
+          for (int e = 0; e < elems_per_item; ++e) {
+            st[conv_states_strides.offset(i, reordered_feat + e)] =
+                slm_input[slot * feats_per_wg + local_feat + e];
+          }
+        }
+      }
+    }
   }
 
  private:
@@ -627,6 +655,8 @@ struct chunk_causal_conv1d_tiled_kernel {
   const int num_virtual_tokens;
   char* slm_data;
   const bool fuse_l2norm;
+  const int* checkpoint_offsets;
+  const int* checkpoint_state_indices;
 };
 
 template <typename T, int Width, int TileT, bool ReorderInput>
@@ -663,7 +693,9 @@ void tiled_kernel_launcher(
     const int& conv_elems,
     const int& num_prefills,
     const int& num_decodes,
-    const bool fuse_l2norm) {
+    const bool fuse_l2norm,
+    const int* checkpoint_offsets,
+    const int* checkpoint_state_indices) {
   // Note: z_out, b_out, a_out, mixed_ba are passed through to the
   // ZBA reorder kernel below, not to the tiled conv1d kernel itself.
   using KERNEL_MAIN =
@@ -709,7 +741,9 @@ void tiled_kernel_launcher(
           conv_elems,
           num_virtual_tokens,
           slm_ptr,
-          fuse_l2norm);
+          fuse_l2norm,
+          checkpoint_offsets,
+          checkpoint_state_indices);
       task(item);
     });
   });
@@ -757,7 +791,9 @@ void chunk_causal_conv1d_tiled_xe2(
     const bool reorder_input,
     const int* token_indx = nullptr,
     int num_actual_tokens_override = -1,
-    const bool fuse_l2norm = false) {
+    const bool fuse_l2norm = false,
+    const int* checkpoint_offsets = nullptr,
+    const int* checkpoint_state_indices = nullptr) {
   if (num_prefills == 0 && num_decodes == 0) {
     return;
   }
@@ -832,7 +868,9 @@ void chunk_causal_conv1d_tiled_xe2(
       conv_elems,                                                  \
       num_prefills,                                                \
       num_decodes,                                                 \
-      fuse_l2norm);
+      fuse_l2norm,                                                 \
+      checkpoint_offsets,                                          \
+      checkpoint_state_indices);
 
 #define TILED_WIDTH_DISPATCH(scalar_t, width, reorder_input) \
   switch (width) {                                           \
