@@ -81,3 +81,49 @@ def test_rotary_embedding_opcheck(device, max_position, is_neox_style,
         rotary_embedding_opcheck(
             rot, positions, query.flatten(start_dim=-2),
             key.flatten(start_dim=-2) if use_key else None)
+
+
+@pytest.mark.parametrize("dtype",
+                         [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("is_neox_style", [True, False])
+@pytest.mark.parametrize("head_size,rotary_dim", [(64, 64), (128, 64)])
+@pytest.mark.parametrize("head_pad", [0, 1])
+@pytest.mark.parametrize("num_tokens", [7, 1024])
+@torch.inference_mode()
+def test_rotary_embedding_accuracy(dtype, is_neox_style, head_size,
+                                   rotary_dim, head_pad, num_tokens):
+    # head_pad=1 gives odd head/token strides, so the vectorized launch is
+    # rejected and the element-wise fallback runs with odd addresses.
+    torch.manual_seed(0)
+    device = "xpu"
+    num_heads, num_kv_heads, max_position = 8, 2, 4096
+    rot = RotaryEmbedding(head_size, rotary_dim, max_position, 10000,
+                          is_neox_style, torch.float32)
+    positions = torch.randint(0, max_position, (num_tokens, ), device=device)
+    query = torch.randn(num_tokens, num_heads, head_size + head_pad,
+                        dtype=dtype, device=device)[..., :head_size]
+    key = torch.randn(num_tokens, num_kv_heads, head_size + head_pad,
+                      dtype=dtype, device=device)[..., :head_size]
+
+    # The kernel reads cos/sin in dtype and computes in float, so the float32
+    # reference uses the same rounded cache.
+    cos_sin_cache = rot.cos_sin_cache.to(device, dtype=dtype)
+    rot.cos_sin_cache = cos_sin_cache.float()
+    ref_q, ref_k = rot.forward_native(positions,
+                                      query.float().contiguous(),
+                                      key.float().contiguous())
+
+    # Keep the (possibly odd) strides of query and key in the kernel inputs.
+    q = torch.empty_strided(query.shape, query.stride(), dtype=dtype,
+                            device=device)
+    k = torch.empty_strided(key.shape, key.stride(), dtype=dtype,
+                            device=device)
+    q.copy_(query)
+    k.copy_(key)
+    torch.ops._C.rotary_embedding(positions, q, k, head_size, cos_sin_cache,
+                                  is_neox_style)
+
+    tol = {torch.float32: 1e-5, torch.float16: 1e-3, torch.bfloat16: 1e-2}
+    atol = rtol = tol[dtype]
+    torch.testing.assert_close(q.float(), ref_q, atol=atol, rtol=rtol)
+    torch.testing.assert_close(k.float(), ref_k, atol=atol, rtol=rtol)

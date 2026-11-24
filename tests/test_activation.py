@@ -209,3 +209,46 @@ def test_activation(
 
     out = torch.empty_like(x)
     opcheck(fn, (out, x))
+
+
+@pytest.mark.parametrize("limit", [7.0, 1.0])
+@pytest.mark.parametrize("alpha_beta", [(1.0, 0.0), (1.702, 1.0)])
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("d", D)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@torch.inference_mode()
+def test_silu_and_mul_with_clamp(
+    limit: float,
+    alpha_beta: tuple[float, float],
+    num_tokens: int,
+    d: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    """The clamped SwiGLU must match the eager expansion it replaces, which is
+    what the DeepSeek-V4 shared expert runs today."""
+    seed_everything(seed)
+    torch.set_default_device(device)
+    alpha, beta = alpha_beta
+    # Scale up so the clamp is actually exercised on both branches.
+    x = torch.randn(num_tokens, 2 * d, dtype=dtype) * 4.0
+
+    gate = torch.clamp(x[..., :d].float(), max=limit)
+    up = torch.clamp(x[..., d:].float(), min=-limit, max=limit)
+    # The kernel evaluates the whole expression in fp32 and rounds once on
+    # store, so the reference has to do the same: an eager half/bfloat16
+    # expansion would round at every step and drift from the kernel.
+    ref_out = (gate * torch.sigmoid(alpha * gate) * (up + beta)).to(dtype)
+
+    out = torch.empty(num_tokens, d, dtype=dtype)
+    torch.ops._C.silu_and_mul_with_clamp(out, x, limit, alpha, beta)
+    torch.testing.assert_close(out,
+                               ref_out,
+                               atol=get_default_atol(ref_out),
+                               rtol=get_default_rtol(ref_out))
+
+    opcheck(torch.ops._C.silu_and_mul_with_clamp,
+            (out, x, limit, alpha, beta))

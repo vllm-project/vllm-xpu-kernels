@@ -261,6 +261,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "-> ()");
   ops.impl("swiglustep_and_mul", torch::kXPU, &swiglustep_and_mul);
 
+  // silu_and_mul_with_clamp
+  ops.def(
+      "silu_and_mul_with_clamp(Tensor! out, Tensor input, float limit, "
+      "float alpha=1.0, float beta=0.0) -> ()");
+  ops.impl("silu_and_mul_with_clamp", torch::kXPU, &silu_and_mul_with_clamp);
+
   ops.def(
       "get_xpu_view_from_cpu_tensor(Tensor cpu_tensor) -> "
       "Tensor");
@@ -375,6 +381,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "cp_gather_and_upconvert_fp8_kv_cache",
       torch::kXPU,
       &cp_gather_and_upconvert_fp8_kv_cache);
+  cache_ops.def(
+      "dequantize_and_gather_k_cache(Tensor! out,"
+      "                              Tensor k_cache,"
+      "                              Tensor seq_lens,"
+      "                              Tensor? gather_lens,"
+      "                              Tensor block_table,"
+      "                              int block_size,"
+      "                              int offset) -> ()");
+  cache_ops.impl(
+      "dequantize_and_gather_k_cache",
+      torch::kXPU,
+      &dequantize_and_gather_k_cache);
 
   // Convert between FP8 and FP16/BF16/FP32 formats with scaling
   cache_ops.def(

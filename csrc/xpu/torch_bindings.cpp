@@ -101,6 +101,20 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "fused_kv_compress_norm_rope_insert_sparse_attn",
       torch::kXPU,
       &fused_kv_compress_norm_rope_insert_sparse_attn);
+  // Fused QK-Norm + RoPE + KV-Cache-Write + FP8 Q Quantization.
+  // Returns q_scale: [num_tokens, num_q_heads] (per-token-per-head).
+  xpu_ops.def(
+      "fused_rope_norm_store_kv_fp8(Tensor qkv, Tensor cos_sin_cache, "
+      "Tensor positions, Tensor! key_cache, Tensor! value_cache, "
+      "Tensor slot_mapping, "
+      "Tensor! out_q, int num_q_heads, int num_kv_heads, int head_dim, "
+      "Tensor k_scale, Tensor v_scale, Tensor? q_norm_weight, "
+      "Tensor? k_norm_weight, int qk_norm_policy, bool use_fp8) "
+      "-> Tensor");
+  xpu_ops.impl(
+      "fused_rope_norm_store_kv_fp8",
+      torch::kXPU,
+      &fused_rope_norm_store_kv_fp8);
 
   // Multi-modal Rotary Embedding (M-RoPE) — used by e.g. Qwen2-VL.
   // positions has shape [num_mrope_sections, num_tokens]; mrope_section is
@@ -147,12 +161,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("deepseek_inv_rope_bf16", torch::kXPU, &deepseek_inv_rope_bf16);
 
   // DeepSeek-V4 fused inverse RoPE + FP8 quantization: inv GPT-J rotation +
-  // per-128-block UE8M0 FP8 E4M3 quantization + group-major layout transform.
+  // block-scaled FP8 E4M3 quantization + group-major layout transform.
+  // use_mxfp8=False: per-128-block UE8M0 scales as float32.
+  // use_mxfp8=True:  per-32-block raw E8M0 scales (float8_e8m0fnu).
   xpu_ops.def(
       "deepseek_inv_rope_fp8_quant(Tensor attn_output, Tensor positions,"
       "                            Tensor cos_sin_cache, int n_groups,"
       "                            int heads_per_group, int nope_dim,"
-      "                            int rope_dim) -> (Tensor, Tensor)");
+      "                            int rope_dim, bool use_mxfp8=False)"
+      "                            -> (Tensor, Tensor)");
   xpu_ops.impl(
       "deepseek_inv_rope_fp8_quant", torch::kXPU, &deepseek_inv_rope_fp8_quant);
 

@@ -542,12 +542,15 @@ ext_modules = []
 # Only include libraries whose cmake targets will actually be built, based on
 # the architecture and TLA kernel options.
 additional_libraries = {}
-# The Xe3 asm quant library is built independently of the SYCL-TLA kernels;
-# keep this condition in sync with the quant_asm_xe_3 target in CMakeLists.txt.
+# Xe3-only companion libraries are built independently of the SYCL-TLA kernels;
+# keep these conditions in sync with add_xe3_companion_library in
+# CMakeLists.txt.
 if (_is_enabled("VLLM_XPU_ENABLE_XE3P", default="ON")
-        and _is_enabled("BASIC_KERNELS_ENABLED")
         and _is_enabled("BUILD_QUANT_ASM_XE3")):
-    additional_libraries["quant_asm_xe_3"] = ""
+    if _is_enabled("BASIC_KERNELS_ENABLED"):
+        additional_libraries["quant_asm_xe_3"] = ""
+    if _is_enabled("XPU_SPECIFIC_KERNELS_ENABLED"):
+        additional_libraries["inv_rope_asm_xe_3"] = ""
 if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
     if _is_enabled("VLLM_XPU_ENABLE_XE2"):
         if _is_enabled("FA2_KERNELS_ENABLED"):

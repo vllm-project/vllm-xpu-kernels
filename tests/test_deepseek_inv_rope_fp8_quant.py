@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Correctness tests for deepseek_inv_rope_fp8_quant SYCL kernel.
 
-Tests the fused inverse GPT-J RoPE + per-128-block FP8 E4M3 quantization kernel
-against a pure-PyTorch reference implementation.
+Tests the fused inverse GPT-J RoPE + block-scaled FP8 E4M3 quantization kernel
+against a pure-PyTorch reference, in both output formats: per-128 float32
+scales (use_mxfp8=False) and per-32 raw E8M0 scales (use_mxfp8=True).
 
 Run:
-    pytest tests/test_deepseek_inv_rope_fp8_quant.py -v
+    pytest --noconftest tests/test_deepseek_inv_rope_fp8_quant.py -v
 """
 import pytest
 import torch
@@ -21,6 +22,8 @@ ROPE_DIM = 64
 HALF_ROPE = ROPE_DIM // 2
 QUANT_GROUP_SIZE = 128
 CHUNKS_PER_HEAD = HEAD_DIM // QUANT_GROUP_SIZE  # 4
+MXFP8_GROUP_SIZE = 32
+MX_BLOCKS_PER_HEAD = HEAD_DIM // MXFP8_GROUP_SIZE  # 16
 FP8_MAX = 448.0  # max value of float8_e4m3fn
 
 
@@ -47,17 +50,18 @@ def reference_inv_rope_fp8_quant(
     heads_per_group: int,
     nope_dim: int = NOPE_DIM,
     rope_dim: int = ROPE_DIM,
+    quant_group_size: int = QUANT_GROUP_SIZE,
 ):
     """Full reference: inverse RoPE in fp32 + UE8M0 FP8 quant.
 
     Returns:
         fp8_out:   [G, T, hpg*D] float8_e4m3fn
-        scale_out: [G, T, hpg*chunks] float32
+        scale_out: [G, T, hpg*blocks] float32
     """
     T, H, D = o.shape
     half_rope = rope_dim // 2
     d = heads_per_group * D
-    chunks_per_head = D // QUANT_GROUP_SIZE
+    chunks_per_head = D // quant_group_size
     S = heads_per_group * chunks_per_head
 
     # Reshape [T, H, D] -> [T, G, hpg, D]
@@ -90,12 +94,12 @@ def reference_inv_rope_fp8_quant(
     for g in range(n_groups):
         for h in range(heads_per_group):
             for c in range(chunks_per_head):
-                offset = c * QUANT_GROUP_SIZE
-                block = rotated[:, g, h, offset:offset + QUANT_GROUP_SIZE]
+                offset = c * quant_group_size
+                block = rotated[:, g, h, offset:offset + quant_group_size]
                 x_fp8, scale = _ref_ue8m0_quant_block(block)
 
                 out_offset = h * D + offset
-                fp8_buf[g, :, out_offset:out_offset + QUANT_GROUP_SIZE] = x_fp8
+                fp8_buf[g, :, out_offset:out_offset + quant_group_size] = x_fp8
 
                 scale_idx = h * chunks_per_head + c
                 scale_buf[g, :, scale_idx] = scale
@@ -105,7 +109,8 @@ def reference_inv_rope_fp8_quant(
 
 def assert_dequant_close(ref_fp8, ref_scale, fused_fp8, fused_scale,
                          tight_atol=0.1, loose_atol=1.0,
-                         tight_pass_rate=0.98):
+                         tight_pass_rate=0.98,
+                         quant_group_size=QUANT_GROUP_SIZE):
     """Compare via dequantization (fp8 * scale).
 
     FP8 quantization with power-of-2 scales has inherent boundary effects:
@@ -120,7 +125,7 @@ def assert_dequant_close(ref_fp8, ref_scale, fused_fp8, fused_scale,
     # Reshape scales for broadcasting
     G, T, S = ref_scale.shape
     D = ref_fp8.shape[2]
-    chunks_per_head = CHUNKS_PER_HEAD
+    chunks_per_head = HEAD_DIM // quant_group_size
     heads_per_group = S // chunks_per_head
 
     ref_deq = torch.zeros(G, T, D, dtype=torch.float32, device=ref_fp8.device)
@@ -128,14 +133,14 @@ def assert_dequant_close(ref_fp8, ref_scale, fused_fp8, fused_scale,
 
     for h in range(heads_per_group):
         for c in range(chunks_per_head):
-            offset = h * HEAD_DIM + c * QUANT_GROUP_SIZE
+            offset = h * HEAD_DIM + c * quant_group_size
             scale_idx = h * chunks_per_head + c
             ref_s = ref_scale[:, :, scale_idx:scale_idx + 1]
             fused_s = fused_scale[:, :, scale_idx:scale_idx + 1]
-            ref_deq[:, :, offset:offset + QUANT_GROUP_SIZE] = (
-                ref_fp8[:, :, offset:offset + QUANT_GROUP_SIZE].float() * ref_s)
-            fused_deq[:, :, offset:offset + QUANT_GROUP_SIZE] = (
-                fused_fp8[:, :, offset:offset + QUANT_GROUP_SIZE].float()
+            ref_deq[:, :, offset:offset + quant_group_size] = (
+                ref_fp8[:, :, offset:offset + quant_group_size].float() * ref_s)
+            fused_deq[:, :, offset:offset + quant_group_size] = (
+                fused_fp8[:, :, offset:offset + quant_group_size].float()
                 * fused_s)
 
     diff = (fused_deq - ref_deq).abs()
@@ -232,6 +237,163 @@ def test_output_layout(num_tokens):
     assert scale_out.shape == (n_groups, num_tokens, S)
     assert scale_out.dtype == torch.float32
     assert scale_out.is_contiguous()
+
+
+@pytest.mark.parametrize("num_tokens", [1, 4, 32, 128])
+@pytest.mark.parametrize(
+    "num_heads,n_groups",
+    [(64, 8), (32, 4)],
+    ids=["H64_G8", "H32_G4"],
+)
+@pytest.mark.parametrize("seed", [0, 42])
+def test_correctness_mxfp8(num_tokens, num_heads, n_groups, seed):
+    """MXFP8 path: 32-element blocks with raw E8M0 scales."""
+    torch.manual_seed(seed)
+    heads_per_group = num_heads // n_groups
+    max_pos = 4096
+
+    o = torch.randn(num_tokens, num_heads, HEAD_DIM,
+                    dtype=torch.bfloat16, device=DEVICE)
+    positions = torch.randint(0, max_pos, (num_tokens,),
+                              dtype=torch.int64, device=DEVICE)
+    cos_sin_cache = torch.randn(max_pos, ROPE_DIM,
+                                dtype=torch.float32, device=DEVICE)
+
+    ref_fp8, ref_scale = reference_inv_rope_fp8_quant(
+        o, positions, cos_sin_cache, n_groups, heads_per_group,
+        quant_group_size=MXFP8_GROUP_SIZE)
+
+    fused_fp8, fused_scale = torch.ops._xpu_C.deepseek_inv_rope_fp8_quant(
+        o, positions, cos_sin_cache,
+        n_groups, heads_per_group, NOPE_DIM, ROPE_DIM, True)
+
+    d = heads_per_group * HEAD_DIM
+    S = heads_per_group * MX_BLOCKS_PER_HEAD
+    assert fused_fp8.shape == (n_groups, num_tokens, d)
+    assert fused_scale.shape == (n_groups, num_tokens, S)
+    assert fused_scale.dtype == torch.float8_e8m0fnu
+
+    # E8M0 stores the biased exponent only, so .float() is the exact 2**e.
+    fused_scale_f32 = fused_scale.float()
+
+    scale_ratio = fused_scale_f32 / ref_scale.clamp(min=1e-30)
+    assert scale_ratio.max() <= 2.0 and scale_ratio.min() >= 0.5, (
+        f"Scale ratio out of [0.5, 2]: min={scale_ratio.min():.4f} "
+        f"max={scale_ratio.max():.4f}")
+
+    assert_dequant_close(ref_fp8, ref_scale, fused_fp8, fused_scale_f32,
+                         quant_group_size=MXFP8_GROUP_SIZE)
+
+
+@pytest.mark.parametrize("num_tokens", [1, 16, 64, 8192])
+def test_output_layout_mxfp8(num_tokens):
+    """MXFP8 path: verify scale tensor shape and dtype."""
+    num_heads, n_groups = 64, 8
+    heads_per_group = num_heads // n_groups
+    max_pos = 4096
+
+    o = torch.randn(num_tokens, num_heads, HEAD_DIM,
+                    dtype=torch.bfloat16, device=DEVICE)
+    positions = torch.randint(0, max_pos, (num_tokens,),
+                              dtype=torch.int64, device=DEVICE)
+    cos_sin_cache = torch.randn(max_pos, ROPE_DIM,
+                                dtype=torch.float32, device=DEVICE)
+
+    fp8_out, scale_out = torch.ops._xpu_C.deepseek_inv_rope_fp8_quant(
+        o, positions, cos_sin_cache,
+        n_groups, heads_per_group, NOPE_DIM, ROPE_DIM, True)
+
+    d = heads_per_group * HEAD_DIM
+    S = heads_per_group * MX_BLOCKS_PER_HEAD
+
+    assert fp8_out.shape == (n_groups, num_tokens, d)
+    assert fp8_out.dtype == torch.float8_e4m3fn
+    assert fp8_out.is_contiguous()
+
+    assert scale_out.shape == (n_groups, num_tokens, S)
+    assert scale_out.dtype == torch.float8_e8m0fnu
+    assert scale_out.is_contiguous()
+
+
+def test_mxfp8_scale_block_order():
+    """Pin the block -> scale-byte mapping with 16 distinct scales per head.
+
+    The kernel assembles a head's 16 e8m0 bytes across two lane halves, so a
+    wrong interleave is a pure permutation. randn inputs only ever produce 2-4
+    distinct scales per head, which would hide most such permutations.
+    """
+    num_heads, n_groups, num_tokens = 8, 1, 4
+    heads_per_group = num_heads // n_groups
+
+    # cos=1, sin=0 makes the inverse rope an identity, so the magnitude ladder
+    # reaches the rope blocks unchanged and every scale stays exact.
+    cos_sin_cache = torch.zeros(16, ROPE_DIM, dtype=torch.float32,
+                                device=DEVICE)
+    cos_sin_cache[:, :ROPE_DIM // 2] = 1.0
+    positions = torch.zeros(num_tokens, dtype=torch.int64, device=DEVICE)
+
+    amp = torch.tensor([2.0 ** (b - 8) for b in range(MX_BLOCKS_PER_HEAD)],
+                       dtype=torch.float32, device=DEVICE)
+    o = amp.repeat_interleave(MXFP8_GROUP_SIZE).expand(
+        num_tokens, num_heads, HEAD_DIM).to(torch.bfloat16).contiguous()
+
+    _, scale_out = torch.ops._xpu_C.deepseek_inv_rope_fp8_quant(
+        o, positions, cos_sin_cache,
+        n_groups, heads_per_group, NOPE_DIM, ROPE_DIM, True)
+
+    got = scale_out.float().view(n_groups, num_tokens, heads_per_group,
+                                 MX_BLOCKS_PER_HEAD)
+    # 2^(b-8) / 448 ceils to 2^(b-16).
+    expect = torch.tensor([2.0 ** (b - 16) for b in range(MX_BLOCKS_PER_HEAD)],
+                          dtype=torch.float32, device=DEVICE)
+    assert torch.equal(got, expect.expand_as(got)), (
+        f"block -> scale mapping is wrong\n"
+        f"  expected {expect.tolist()}\n"
+        f"  got      {got[0, 0, 0].tolist()}")
+
+
+def test_mxfp8_block_absmax_covers_every_lane():
+    """Every one of a block's 32 elements must reach the absmax reduction.
+
+    The kernel reduces all 16 blocks with a single butterfly, where lane l ends
+    up owning block l. A butterfly that keeps the wrong half still produces a
+    plausible absmax, and randn inputs hide it: max-of-16 vs max-of-32 usually
+    ceils to the same power of two. Here each block has one dominant element,
+    placed so that block b's peak lives in lane b, so dropping any lane shifts
+    that block's scale by 2**-8.
+    """
+    num_heads, n_groups, num_tokens = 8, 1, 4
+    heads_per_group = num_heads // n_groups
+
+    cos_sin_cache = torch.zeros(16, ROPE_DIM, dtype=torch.float32,
+                                device=DEVICE)
+    cos_sin_cache[:, :ROPE_DIM // 2] = 1.0
+    positions = torch.zeros(num_tokens, dtype=torch.int64, device=DEVICE)
+
+    head = torch.empty(HEAD_DIM, dtype=torch.float32, device=DEVICE)
+    for b in range(MX_BLOCKS_PER_HEAD):
+        base = b * MXFP8_GROUP_SIZE
+        head[base:base + MXFP8_GROUP_SIZE] = 2.0**(b - 16)
+        # Lane l holds elements 2l and 2l+1, so 2b walks the peak one lane per
+        # block; the +b%2 alternates the even/odd slot within that lane.
+        head[base + 2 * b + (b % 2)] = -(2.0**(b - 8))
+
+    o = head.expand(num_tokens, num_heads,
+                    HEAD_DIM).to(torch.bfloat16).contiguous()
+
+    _, scale_out = torch.ops._xpu_C.deepseek_inv_rope_fp8_quant(
+        o, positions, cos_sin_cache,
+        n_groups, heads_per_group, NOPE_DIM, ROPE_DIM, True)
+
+    got = scale_out.float().view(n_groups, num_tokens, heads_per_group,
+                                 MX_BLOCKS_PER_HEAD)
+    # 2^(b-8) / 448 ceils to 2^(b-16); losing the peak would give 2^(b-24).
+    expect = torch.tensor([2.0**(b - 16) for b in range(MX_BLOCKS_PER_HEAD)],
+                          dtype=torch.float32, device=DEVICE)
+    assert torch.equal(got, expect.expand_as(got)), (
+        f"a block absmax missed some of its 32 elements\n"
+        f"  expected {expect.tolist()}\n"
+        f"  got      {got[0, 0, 0].tolist()}")
 
 
 def test_zero_tokens():
