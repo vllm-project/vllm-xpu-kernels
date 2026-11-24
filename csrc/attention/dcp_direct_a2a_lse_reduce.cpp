@@ -377,12 +377,17 @@ class WaitLseCombine : public xpu::SyclKernelConfigConvention {
   sycl::local_accessor<int32_t, 1> timed_out_;
 };
 
-inline const uint64_t* ptr_table(const torch::Tensor& t, const char* name) {
+inline const uint64_t* ptr_table(
+    const torch::Tensor& t,
+    const char* name,
+    const at::Device& device,
+    int64_t world_size) {
   TORCH_CHECK(
       (t.scalar_type() == at::kLong || t.scalar_type() == at::kUInt64) &&
-          t.is_contiguous() && t.device().is_xpu(),
+          t.is_contiguous() && t.device() == device && t.numel() >= world_size,
       name,
-      " must be a contiguous int64/uint64 XPU tensor");
+      " must be a contiguous int64/uint64 tensor with world_size entries on ",
+      "the input device");
   return reinterpret_cast<const uint64_t*>(t.data_ptr());
 }
 
@@ -408,9 +413,10 @@ void direct_dcp_a2a_lse_reduce(
     bool is_lse_base_on_e) {
   using namespace vllm::direct_dcp;
   const at::DeviceGuard device_guard(partial_output.device());
+  const auto device = partial_output.device();
   TORCH_CHECK(
-      partial_output.is_xpu() && partial_lse.is_xpu(),
-      "partial output and LSE must be XPU tensors");
+      partial_output.is_xpu() && partial_lse.device() == device,
+      "partial output and LSE must be on the same XPU device");
   const auto output_dtype = partial_output.scalar_type();
   TORCH_CHECK(
       output_dtype == at::kHalf || output_dtype == at::kBFloat16,
@@ -451,8 +457,11 @@ void direct_dcp_a2a_lse_reduce(
   const int64_t heads_per_rank = total_heads / world_size;
   TORCH_CHECK(
       combined_output.scalar_type() == output_dtype &&
-          combined_output.is_contiguous() && combined_output.is_xpu(),
-      "combined output must match the contiguous XPU input");
+          combined_output.is_contiguous() &&
+          combined_output.device() == device &&
+          reinterpret_cast<uintptr_t>(combined_output.data_ptr()) % 16 == 0,
+      "combined output must be a contiguous, 16-byte aligned tensor on the "
+      "input device with the input dtype");
   TORCH_CHECK(
       combined_output.size(0) == num_tokens &&
           combined_output.size(1) == heads_per_rank &&
@@ -463,6 +472,18 @@ void direct_dcp_a2a_lse_reduce(
           received_lse.scalar_type() == at::kFloat &&
           received_signal.scalar_type() == at::kInt,
       "invalid symmetric staging dtypes");
+  const int64_t staging_entries = 2 * world_size * max_num_tokens;
+  TORCH_CHECK(
+      received_output.is_contiguous() && received_lse.is_contiguous() &&
+          received_signal.is_contiguous() &&
+          received_output.device() == device &&
+          received_lse.device() == device && received_signal.device() == device,
+      "symmetric staging buffers must be contiguous and on the input device");
+  TORCH_CHECK(
+      received_output.numel() >= staging_entries * heads_per_rank * head_dim &&
+          received_lse.numel() >= staging_entries * heads_per_rank,
+      "symmetric staging buffers are smaller than 2 * world_size * "
+      "max_num_tokens entries");
   // Signal slots are strided so each one owns a cache line; the stride is
   // inferred from the buffer size to keep the op schema unchanged.
   const int64_t signal_slots = 2 * world_size;
@@ -500,8 +521,9 @@ void direct_dcp_a2a_lse_reduce(
       kCacheLineBytes,
       "-byte aligned");
   TORCH_CHECK(
-      epoch.scalar_type() == at::kLong && epoch.numel() >= 1,
-      "epoch must be an int64 tensor");
+      epoch.scalar_type() == at::kLong && epoch.numel() >= 1 &&
+          epoch.device() == device,
+      "epoch must be an int64 tensor on the input device");
 
   const int32_t* seq_lens_ptr = nullptr;
   const int32_t* query_start_loc_ptr = nullptr;
@@ -511,14 +533,15 @@ void direct_dcp_a2a_lse_reduce(
       "seq_lens and query_start_loc must be provided together");
   if (seq_lens.has_value()) {
     TORCH_CHECK(
-        seq_lens->is_xpu() && seq_lens->dim() == 1 &&
+        seq_lens->device() == device && seq_lens->dim() == 1 &&
             seq_lens->stride(0) == 1 && seq_lens->scalar_type() == at::kInt,
-        "seq_lens must be a contiguous 1-D int32 XPU tensor");
+        "seq_lens must be a contiguous 1-D int32 tensor on the input device");
     TORCH_CHECK(
-        query_start_loc->is_xpu() && query_start_loc->dim() == 1 &&
+        query_start_loc->device() == device && query_start_loc->dim() == 1 &&
             query_start_loc->stride(0) == 1 &&
             query_start_loc->scalar_type() == at::kInt,
-        "query_start_loc must be a contiguous 1-D int32 XPU tensor");
+        "query_start_loc must be a contiguous 1-D int32 tensor on the input "
+        "device");
     num_seqs = seq_lens->size(0);
     TORCH_CHECK(
         num_seqs > 0 && query_start_loc->size(0) == num_seqs + 1,
@@ -527,9 +550,12 @@ void direct_dcp_a2a_lse_reduce(
     query_start_loc_ptr = query_start_loc->const_data_ptr<int32_t>();
   }
 
-  const uint64_t* output_ptrs = ptr_table(peer_output_ptrs, "peer_output_ptrs");
-  const uint64_t* lse_ptrs = ptr_table(peer_lse_ptrs, "peer_lse_ptrs");
-  const uint64_t* signal_ptrs = ptr_table(peer_signal_ptrs, "peer_signal_ptrs");
+  const uint64_t* output_ptrs =
+      ptr_table(peer_output_ptrs, "peer_output_ptrs", device, world_size);
+  const uint64_t* lse_ptrs =
+      ptr_table(peer_lse_ptrs, "peer_lse_ptrs", device, world_size);
+  const uint64_t* signal_ptrs =
+      ptr_table(peer_signal_ptrs, "peer_signal_ptrs", device, world_size);
 
   auto& queue = vllm::xpu::vllmGetQueue();
   constexpr int64_t kExchangeThreads = 256;

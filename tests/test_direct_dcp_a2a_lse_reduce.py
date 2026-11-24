@@ -352,3 +352,47 @@ def test_direct_dcp_a2a_lse_reduce_rejects_line_sharing_layout(
             torch.zeros(1, dtype=torch.int64, device=device),
             partial_output.new_empty(1, HEADS_PER_RANK, HEAD_DIM),
             world_size, 0, max_num_tokens, False)
+
+
+@pytest.mark.parametrize(
+    "bad", ["short_ptr_table", "small_staging", "unaligned_output",
+            "cpu_epoch"])
+def test_direct_dcp_a2a_lse_reduce_rejects_unsafe_arguments(bad):
+    """Arguments that would make the kernels access memory out of bounds,
+    misaligned, or on the wrong device must be refused."""
+    world_size, device = 2, torch.device("xpu", 0)
+    total_heads = world_size * HEADS_PER_RANK
+    args = dict(
+        partial_output=torch.zeros(1, total_heads, HEAD_DIM,
+                                   dtype=torch.bfloat16, device=device),
+        partial_lse=torch.zeros(1, total_heads, device=device),
+        ptrs=torch.zeros(world_size, dtype=torch.uint64, device=device),
+        received_output=torch.zeros(2, world_size, MAX_NUM_TOKENS,
+                                    HEADS_PER_RANK, HEAD_DIM,
+                                    dtype=torch.bfloat16, device=device),
+        received_lse=torch.zeros(2, world_size, MAX_NUM_TOKENS,
+                                 HEADS_PER_RANK, device=device),
+        received_signal=torch.zeros(2, world_size, SIGNAL_STRIDE,
+                                    dtype=torch.int32, device=device),
+        epoch=torch.zeros(1, dtype=torch.int64, device=device),
+        combined_output=torch.empty(1, HEADS_PER_RANK, HEAD_DIM,
+                                    dtype=torch.bfloat16, device=device),
+    )
+    if bad == "short_ptr_table":
+        args["ptrs"] = args["ptrs"][:1]
+    elif bad == "small_staging":
+        args["received_output"] = args["received_output"][:1]
+    elif bad == "unaligned_output":
+        storage = torch.empty(1 + HEADS_PER_RANK * HEAD_DIM,
+                              dtype=torch.bfloat16, device=device)
+        args["combined_output"] = storage[1:].view(1, HEADS_PER_RANK,
+                                                   HEAD_DIM)
+    else:
+        args["epoch"] = args["epoch"].cpu()
+    ptrs = args["ptrs"]
+    with pytest.raises(RuntimeError):
+        torch.ops._C.direct_dcp_a2a_lse_reduce(
+            args["partial_output"], args["partial_lse"], None, None, ptrs,
+            ptrs, ptrs, args["received_output"], args["received_lse"],
+            args["received_signal"], args["epoch"], args["combined_output"],
+            world_size, 0, MAX_NUM_TOKENS, False)
