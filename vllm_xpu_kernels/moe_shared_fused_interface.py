@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Fused routed + shared-expert MoE forward for small-M decode on Xe2.
+"""Fused routed + shared-expert MoE forward for small-M decode on Battlemage.
 
 Wraps ``torch.ops._xpu_C.moe_shared_fused_decode_interface``: routed experts
 and the single sigmoid-gated shared expert run in one op (six kernels, no
@@ -29,8 +29,7 @@ def is_available() -> bool:
 
 
 def _is_supported_device(device_index: int) -> bool:
-    return (torch.ops._xpu_C.is_xe2_arch(device_index)
-            and not torch.ops._xpu_C.is_pvc(device_index))
+    return torch.ops._xpu_C.is_bmg(device_index)
 
 
 def supports(
@@ -44,9 +43,10 @@ def supports(
 ) -> bool:
     """Whether the op supports the static weights on the given XPU device.
 
-    Defaults to the current XPU. Requires an Xe2 device, FP16/BF16 activations,
-    fp8-e4m3 per-tensor weights, positive dimensions and H/I multiples of 32.
-    The caller selects eligible token counts before invoking the op.
+    Defaults to the current XPU. Requires a Battlemage GPU, FP16/BF16
+    activations, fp8-e4m3 per-tensor weights, positive dimensions and H/I
+    multiples of 32. The caller selects eligible token counts before invoking
+    the op.
     """
     if device is not None and device.type != "xpu":
         return False

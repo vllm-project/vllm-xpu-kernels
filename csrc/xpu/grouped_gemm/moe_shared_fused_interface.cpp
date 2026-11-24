@@ -35,9 +35,7 @@ void moe_shared_fused_decode_interface(
       x.size(0) > 0 && topk_ids.size(1) > 0,
       "token and top-k counts must be positive");
   const auto device_index = x.get_device();
-  // The shared Xe2 backend also covers PVC, which this op excludes.
-  if (vllm::xpu::is_xe2_arch(device_index) &&
-      !vllm::xpu::is_pvc(device_index)) {
+  if (vllm::xpu::is_bmg(device_index)) {
 #ifdef VLLM_XPU_ENABLE_XE2
     if (tile_m == 0) {
       tile_m = x.size(0) <= kMoeSharedFusedTileM8MaxRows / topk_ids.size(1)
@@ -67,5 +65,6 @@ void moe_shared_fused_decode_interface(
   }
   TORCH_CHECK(
       false,
-      "moe_shared_fused_decode: unsupported device arch. Requires an Xe2 GPU.");
+      "moe_shared_fused_decode: unsupported device arch. Requires a "
+      "Battlemage GPU.");
 }

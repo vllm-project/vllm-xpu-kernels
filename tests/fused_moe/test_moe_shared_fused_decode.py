@@ -18,7 +18,7 @@ requires_moe_op = pytest.mark.skipif(
     not moe_op_available, reason="moe_shared_fused_decode op and XPU required")
 requires_moe_kernel = pytest.mark.skipif(
     not (moe_op_available and interface._is_supported_device(-1)),
-    reason="moe_shared_fused_decode requires a built op on an Xe2 GPU",
+    reason="moe_shared_fused_decode requires a built op on a Battlemage GPU",
 )
 
 
@@ -246,38 +246,23 @@ def test_moe_activation_dtype_contract(monkeypatch, dtype, supported):
             is supported)
 
 
-@pytest.mark.parametrize(
-    "xe2,xe3,pvc,supported",
-    [
-        pytest.param(True, False, False, True, id="xe2"),
-        pytest.param(False, True, False, False, id="xe3"),
-        pytest.param(False, False, False, False, id="unsupported"),
-        pytest.param(True, False, True, False, id="pvc"),
-    ],
-)
-def test_moe_supports_device_architecture(monkeypatch, xe2, xe3, pvc,
-                                          supported):
+@pytest.mark.parametrize("bmg", [True, False], ids=["bmg", "non_bmg"])
+def test_moe_supports_device_architecture(monkeypatch, bmg):
     """An installed op must not select fused decode on an unsupported GPU."""
     monkeypatch.setattr(interface, "is_available", lambda: True)
     monkeypatch.setattr(torch.xpu, "is_available", lambda: True)
-    monkeypatch.setattr(torch.ops._xpu_C, "is_xe2_arch", lambda _: xe2,
-                        raising=False)
-    monkeypatch.setattr(torch.ops._xpu_C, "is_xe3_arch", lambda _: xe3,
-                        raising=False)
-    monkeypatch.setattr(torch.ops._xpu_C, "is_pvc", lambda _: pvc,
+    monkeypatch.setattr(torch.ops._xpu_C, "is_bmg", lambda _: bmg,
                         raising=False)
     assert (interface.supports(torch.float16, torch.float8_e4m3fn,
-                               8, 2048, 256) is supported)
+                               8, 2048, 256) is bmg)
 
 
 def test_moe_supports_explicit_device(monkeypatch):
     """Eligibility follows the supplied device rather than the current GPU."""
     monkeypatch.setattr(interface, "is_available", lambda: True)
     monkeypatch.setattr(torch.xpu, "is_available", lambda: True)
-    monkeypatch.setattr(torch.ops._xpu_C, "is_xe2_arch",
+    monkeypatch.setattr(torch.ops._xpu_C, "is_bmg",
                         lambda device_index: device_index == 1, raising=False)
-    monkeypatch.setattr(torch.ops._xpu_C, "is_pvc", lambda _: False,
-                        raising=False)
     assert interface.supports(torch.float16, torch.float8_e4m3fn,
                               8, 2048, 256, device=torch.device("xpu:1"))
     assert not interface.supports(torch.float16, torch.float8_e4m3fn,
