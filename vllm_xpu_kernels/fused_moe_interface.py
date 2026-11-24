@@ -105,6 +105,29 @@ def _to_n_major(scales):
     return scales.transpose(-1, -2).contiguous().transpose(-1, -2)
 
 
+def _assign_inplace(param, new):
+    """Point `param` at `new`'s contents while keeping param's storage.
+
+    Callers may already hold views of the loaded weights (vLLM's EPLB keeps
+    `w.view(E, -1)` of every expert weight to move experts between ranks).
+    Swapping `.data` to a new allocation would keep the old storage alive
+    through those views, doubling expert memory, and leave the views stale.
+    """
+    if param is None or new is None:
+        return
+    old = param.data
+    if new.untyped_storage().data_ptr() == old.untyped_storage().data_ptr():
+        param.data = new
+        return
+    if (not old.is_contiguous() or old.element_size() != new.element_size()
+            or old.numel() != new.numel()):
+        param.data = new
+        return
+    dst = old if old.dtype == new.dtype else old.view(new.dtype)
+    dst.view(-1).copy_(new.reshape(-1))
+    param.data = dst.view(new.shape)
+
+
 def _to_xe2_layout(weight, scales):
     """Checkpoint layout -> what csrc/xpu/grouped_gemm/xe_2 indexes.
 
@@ -277,19 +300,17 @@ class XpuFusedMoe:
                 for i in range(num_experts):
                     w13_tmp[i] = implement_zp(w13[i])
                     w2_tmp[i] = implement_zp(w2[i])
-                w13.data = w13_tmp.contiguous()
-                w2.data = w2_tmp.contiguous()
+                _assign_inplace(w13, w13_tmp)
+                _assign_inplace(w2, w2_tmp)
 
             to_kernel_layout = _to_xe2_layout \
                 if self._uses_xe2 else _to_xe3_layout
             w13_data, w13_scales_data = to_kernel_layout(w13, w13_scales)
             w2_data, w2_scales_data = to_kernel_layout(w2, w2_scales)
-            w13.data = w13_data
-            w2.data = w2_data
-            if w13_scales is not None:
-                w13_scales.data = w13_scales_data
-            if w2_scales is not None:
-                w2_scales.data = w2_scales_data
+            _assign_inplace(w13, w13_data)
+            _assign_inplace(w2, w2_data)
+            _assign_inplace(w13_scales, w13_scales_data)
+            _assign_inplace(w2_scales, w2_scales_data)
             w13.xpu_fused_moe = True
 
         # 4bits support [E, N, K]
