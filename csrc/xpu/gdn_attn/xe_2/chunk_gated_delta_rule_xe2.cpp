@@ -22,7 +22,9 @@ void chunk_gated_delta_rule_xe2(
         has_initial_state,  // [batch_size] or None
     const int num_prefills,
     const int num_decodes,
-    const int* token_indx) {
+    const int* token_indx,
+    const int* checkpoint_offsets,
+    const int* checkpoint_state_indices) {
   gdn::chunk_gated_delta_rule_impl_xe2(
       queue,
       core_attn_out,
@@ -39,5 +41,7 @@ void chunk_gated_delta_rule_xe2(
       has_initial_state,
       num_prefills,
       num_decodes,
-      token_indx);
+      token_indx,
+      checkpoint_offsets,
+      checkpoint_state_indices);
 }
