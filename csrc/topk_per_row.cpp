@@ -9,6 +9,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 
 #include "dispatch_utils.h"
 #include "utils.h"
@@ -123,10 +124,16 @@ static constexpr int kHistCopies = 4;
 // histogram over a row that is too short to hide them.
 static constexpr int kLongHistCopies = 7;
 
+// What a device with too little SLM per Xe core for the copies above keeps
+// throughout instead, see hasLongHist().
+static constexpr int kShortHistCopies = 2;
+
 struct Histogram {
-  // 16-byte aligned so the reduce path can sweep a thread's bins as one vector.
-  alignas(16) int data[kNumBins * kLongHistCopies];
   int tmp[SUBGROUP_SIZE + 1];  // used in prefix sum computation
+  // 16-byte aligned so the reduce path can sweep a thread's bins as one vector.
+  // Last in SharedStates, so that a device that keeps only kShortHistCopies
+  // (see hasLongHist()) can drop the rest from the end of the allocation.
+  alignas(16) int data[kNumBins * kLongHistCopies];
 };
 
 // The histogram and the final-pass items used to share one allocation through
@@ -142,8 +149,6 @@ struct SmemFinal {
 
 // Struct to hold all static sized shared memory objects
 struct SharedStates {
-  // Shared memory to compute the block sort.
-  SmemFinal smemFinal;
   // One slot per row of a group, so the rows sharing a work-group in the
   // grouped kernel each get their own. Slot 0 is the one every other path uses.
   // Shared memory to store the threshold bin.
@@ -161,7 +166,19 @@ struct SharedStates {
   // Output slot counter for the elements processRefineStep() accepts on their
   // fp16 bin alone.
   int smemRefineDstIdx[1];
+  // Shared memory to compute the block sort. Last, see Histogram::data.
+  SmemFinal smemFinal;
 };
+
+// The bytes of the histogram copies past kShortHistCopies, at the end of
+// SharedStates.
+static constexpr size_t kLongHistExtraBytes =
+    kNumBins * (kLongHistCopies - kShortHistCopies) * sizeof(int);
+static_assert(
+    offsetof(SharedStates, smemFinal) + offsetof(SmemFinal, histo) +
+            offsetof(Histogram, data) + sizeof(Histogram::data) ==
+        sizeof(SharedStates),
+    "the histogram copies end SharedStates");
 
 constexpr size_t alignUp(size_t size, size_t alignment) {
   return ((size + alignment - 1) / alignment) * alignment;
@@ -177,6 +194,58 @@ constexpr size_t sharedStatesOffset(size_t topK, bool withLogits = false) {
 
 constexpr size_t sharedMemorySize(size_t topK, bool withLogits = false) {
   return sharedStatesOffset(topK, withLogits) + sizeof(SharedStates);
+}
+
+// Whether the device keeps kHistCopies histogram copies, and kLongHistCopies
+// for long rows. They take the work-group past 64 KiB of SLM: free with 384 KiB
+// per Xe core, but with 128 KiB (BMG) only one work-group then fits a core,
+// which costs every row far more than the copies save, and leaves the groups of
+// a split decode row unable to all be resident at once. Such a device keeps
+// kShortHistCopies instead, under 32 KiB at topK = 2048 so that as many
+// work-groups fit a core as its threads do, and allocates SLM without the rest;
+// topKPerRowJob() sees that from the size it was given.
+struct TopKDeviceInfo {
+  size_t slmPerXeCore;
+  int64_t xeCores;
+};
+
+// Queried once per device, as the decode path runs on every step.
+static const TopKDeviceInfo& topKDeviceInfo(const sycl::queue& queue) {
+  static std::mutex mutex;
+  static std::unordered_map<sycl::device, TopKDeviceInfo> infos;
+  const auto device = queue.get_device();
+  std::lock_guard<std::mutex> lock(mutex);
+  auto it = infos.find(device);
+  if (it == infos.end()) {
+    const TopKDeviceInfo info{
+        device.get_info<sycl::info::device::local_mem_size>(),
+        static_cast<int64_t>(
+            device.get_info<sycl::ext::intel::info::device::gpu_slices>() *
+            device.get_info<
+                sycl::ext::intel::info::device::gpu_subslices_per_slice>())};
+    it = infos.emplace(device, info).first;
+  }
+  return it->second;
+}
+
+static bool hasLongHist(const sycl::queue& queue) {
+  constexpr size_t kMinSlmPerXeCore = 256 * 1024;
+  return topKDeviceInfo(queue).slmPerXeCore >= kMinSlmPerXeCore;
+}
+
+// The SLM the SharedStates paths need on this device.
+static size_t
+deviceSharedMemorySize(bool longHist, size_t topK, bool withLogits = false) {
+  return sharedMemorySize(topK, withLogits) -
+         (longHist ? 0 : kLongHistExtraBytes);
+}
+
+// The SLM of the multi-block and merge kernels. They only run the radix steps,
+// which use one histogram copy, so they allocate none of the others: the extra
+// copies would only cut how many of their work-groups fit an Xe core.
+constexpr size_t stepSharedMemorySize(size_t topK, bool withLogits = false) {
+  return sharedMemorySize(topK, withLogits) -
+         kNumBins * (kLongHistCopies - 1) * sizeof(int);
 }
 
 template <typename scalar_t>
@@ -859,6 +928,10 @@ static bool processRefineStep(
       refineNumBuckets<kNumThreadsPerBlock, kNumBins>(kLongRefineShift) <=
           kNumBins * kLongHistCopies,
       "the buckets of the finest shift fit the histogram this borrows");
+  static_assert(
+      refineNumBuckets<kNumThreadsPerBlock, kNumBins>(kLongRefineShift + 2) <=
+          kNumBins * kShortHistCopies,
+      "the buckets of the coarse shift fit the short histogram");
   const uint32_t base = refineBase<kNumBins>(fastBin);
   // Only called on elements of fastBin, which lie in the first numBuckets
   // buckets. The clamp is there for memory safety only.
@@ -1047,7 +1120,7 @@ static void processTieSelect(
       kNumDigitBuckets % kNumThreadsPerBlock == 0,
       "the buckets split evenly over the threads");
   static_assert(
-      kNumDigitBuckets <= kNumBins * kLongHistCopies,
+      kNumDigitBuckets <= kNumBins * kShortHistCopies,
       "the buckets fit the histogram this borrows");
 
   sycl::group group = item.get_group();
@@ -2091,6 +2164,9 @@ static void topKPerRowJob(
   int* smemFinalDstIdx = sharedStates->smemFinalDstIdx;
   int* smemFinalBinSize = sharedStates->smemFinalBinSize;
   int* smemFoundTopKValues = sharedStates->smemFoundTopKValues;
+  // Whether the host allocated the kLongHistCopies copies, see hasLongHist().
+  const bool longHist =
+      slm.size() >= sharedMemorySize(topK, multipleBlocksPerRow);
 
   // The length of the row.
   int rowLen = rowEnd - rowStart;
@@ -2134,8 +2210,59 @@ static void topKPerRowJob(
       // that fits kFastMaxRegItems slots per thread, and for a longer row the
       // chunked one, with the extra histogram copies once the row is long
       // enough to hide their clear and scan.
+      // A device without the extra copies (see hasLongHist()) takes
+      // kShortHistCopies throughout.
       bool done;
-      if (rowLen <= kFastMaxRegItems * kNumThreadsPerBlock) {
+      const bool regResident = rowLen <= kFastMaxRegItems * kNumThreadsPerBlock;
+      if (!longHist) {
+        if (regResident) {
+          done = topKPerRowReduce<
+              kNumThreadsPerBlock,
+              kNumThreadsPerBlock,
+              kNumBins,
+              kShortHistCopies,
+              kFastMaxRegItems,
+              kFastMaxCandidates,
+              /*kRegResident=*/true>(
+              item,
+              rowBase,
+              rowLen,
+              outIndices,
+              smemFinal.histo.data,
+              smemFinal.histo.tmp,
+              smemFinal.items.indices,
+              smemFinal.items.logits,
+              smemThresholdBinIdx,
+              smemFinalBinSize,
+              smemFoundTopKValues,
+              sharedStates->smemGroupBail,
+              stride1,
+              topK);
+        } else {
+          done = topKPerRowReduce<
+              kNumThreadsPerBlock,
+              kNumThreadsPerBlock,
+              kNumBins,
+              kShortHistCopies,
+              kFastMaxRegItems,
+              kFastMaxCandidates,
+              /*kRegResident=*/false>(
+              item,
+              rowBase,
+              rowLen,
+              outIndices,
+              smemFinal.histo.data,
+              smemFinal.histo.tmp,
+              smemFinal.items.indices,
+              smemFinal.items.logits,
+              smemThresholdBinIdx,
+              smemFinalBinSize,
+              smemFoundTopKValues,
+              sharedStates->smemGroupBail,
+              stride1,
+              topK);
+        }
+      } else if (regResident) {
         done = topKPerRowReduce<
             kNumThreadsPerBlock,
             kNumThreadsPerBlock,
@@ -2243,8 +2370,8 @@ static void topKPerRowJob(
               rowStart,
               rowEnd,
               refineBin,
-              rowLen >= kLongRowMinLen ? kLongRefineShift
-                                       : kLongRefineShift + 2,
+              longHist && rowLen >= kLongRowMinLen ? kLongRefineShift
+                                                   : kLongRefineShift + 2,
               refineAccepted,
               smemOutput,
               smemThresholdBinIdx,
@@ -2685,7 +2812,9 @@ class top_k_per_row_prefill_kernel {
       const int64_t stride0,
       const int64_t stride1,
       const int64_t topK,
-      const int64_t offsetIndex)
+      const int64_t offsetIndex,
+      const int32_t* seqLens = nullptr,
+      const int64_t next_n = 1)
       : slm_(slm),
         indices_(indices),
         logits_(logits),
@@ -2694,7 +2823,9 @@ class top_k_per_row_prefill_kernel {
         stride0_(stride0),
         stride1_(stride1),
         topK_(topK),
-        offsetIndex_(offsetIndex) {}
+        offsetIndex_(offsetIndex),
+        seqLens_(seqLens),
+        next_n_(next_n) {}
   void operator() [[sycl::reqd_sub_group_size(SUBGROUP_SIZE)]] (
       const sycl::nd_item<3>& item) const {
     int64_t group_idx = item.get_group(0);
@@ -2712,14 +2843,22 @@ class top_k_per_row_prefill_kernel {
     // resident together hold a mix of the two. Worth 5 us of 71 on the S=3500
     // triangle at topK=2048, and 6 of those 71 go to the bare read and write,
     // so it buys bus efficiency rather than arithmetic.
-    const int64_t numBlocks = item.get_group_range(0);
-    const int64_t block = (blockIdx_x & 1) ? numBlocks - 1 - (blockIdx_x >> 1)
-                                           : (blockIdx_x >> 1);
-    int rowIdx = block + offsetIndex_;
-
-    // The range of logits within the row.
-    int rowStart = rowStart_[rowIdx];
-    int rowEnd = rowEnd_[rowIdx];
+    //
+    // With seqLens set the kernel serves single-block decode instead, which
+    // runs the same job, so the two share one kernel in the binary.
+    int rowIdx, rowStart, rowEnd;
+    if (seqLens_ != nullptr) {
+      rowIdx = blockIdx_x;
+      rowStart = 0;
+      rowEnd = seqLens_[rowIdx / next_n_] - next_n_ + (rowIdx % next_n_) + 1;
+    } else {
+      const int64_t numBlocks = item.get_group_range(0);
+      const int64_t block = (blockIdx_x & 1) ? numBlocks - 1 - (blockIdx_x >> 1)
+                                             : (blockIdx_x >> 1);
+      rowIdx = block + offsetIndex_;
+      rowStart = rowStart_[rowIdx];
+      rowEnd = rowEnd_[rowIdx];
+    }
 
     // Local pointers to this block
     const int32_t* outIndices = indices_ + static_cast<int64_t>(rowIdx) * topK_;
@@ -2749,6 +2888,8 @@ class top_k_per_row_prefill_kernel {
   const int64_t stride1_;
   const int64_t topK_;
   const int64_t offsetIndex_;
+  const int32_t* seqLens_;  // [num_tokens / next_n], decode only
+  const int64_t next_n_;
 };
 
 template <
@@ -3188,370 +3329,366 @@ class top_k_per_row_decode_split_kernel {
 
     // A short row is one group's work, done by the same job the established
     // path runs, and the row's other groups have nothing to do.
-    if (rowLen < minRowLen_) {
-      if (sliceIdx == 0)
-        topKPerRowJob<kNumThreadsPerBlock, kNumBins, false>(
-            item,
-            slm_,
-            nullptr,
-            rowBase,
-            0,
-            rowLen,
-            outIndices,
-            nullptr,
-            stride1_,
-            topK);
-      return;
-    }
+    // The body below returns whether the row is to be redone by the
+    // single-group job, which is called from this one place only: the job is
+    // large, and every call of it is inlined.
+    const auto splitRow = [&]() -> bool {
+      // Groups past the row's own length leave, and the rest split it evenly.
+      const int splitBlocks = sycl::min(
+          splitBlocks_, (rowLen + kSplitMinSlice - 1) / kSplitMinSlice);
+      if (sliceIdx >= splitBlocks) return false;
 
-    // Groups past the row's own length leave, and the rest split it evenly.
-    const int splitBlocks =
-        sycl::min(splitBlocks_, (rowLen + kSplitMinSlice - 1) / kSplitMinSlice);
-    if (sliceIdx >= splitBlocks) return;
+      int32_t* rowState =
+          workspace_ + static_cast<int64_t>(rowIdx) * kSplitRowStateInts;
+      int32_t* hist0 = rowState;
+      int32_t* hist1 = rowState + kSplitBins0;
+      int32_t* hist2 = rowState + kSplitBins0 + kSplitBins1;
+      int32_t* barriers = rowState + kSplitHistInts;
+      int32_t* cursor = rowState + kSplitCursorOff;
+      int32_t* tieCursor = rowState + kSplitTieOff;
+      int32_t* candCursor = rowState + kSplitCandCursorOff;
+      int32_t* candKeys = rowState + kSplitCandOff;
+      int32_t* candIndices = candKeys + kSplitCandCap;
 
-    int32_t* rowState =
-        workspace_ + static_cast<int64_t>(rowIdx) * kSplitRowStateInts;
-    int32_t* hist0 = rowState;
-    int32_t* hist1 = rowState + kSplitBins0;
-    int32_t* hist2 = rowState + kSplitBins0 + kSplitBins1;
-    int32_t* barriers = rowState + kSplitHistInts;
-    int32_t* cursor = rowState + kSplitCursorOff;
-    int32_t* tieCursor = rowState + kSplitTieOff;
-    int32_t* candCursor = rowState + kSplitCandCursorOff;
-    int32_t* candKeys = rowState + kSplitCandOff;
-    int32_t* candIndices = candKeys + kSplitCandCap;
-
-    // A row whose barrier was abandoned is redone from scratch, by the last of
-    // its groups to leave and with the established single-group job: by then
-    // no other group of the row can still write its output. Every group of
-    // such a row leaves through here, so the count reaches splitBlocks; and the
-    // last one also readies the counters for the next launch, since no group
-    // is left to touch them.
-    const auto barrier = [&](int round, int clearRound) {
-      if (splitRowBarrier(
-              item, barriers, round, clearRound, splitBlocks, smem + 3))
-        return true;
-      if (threadIdx_x == 0) {
-        SplitGlobalAtomic left(rowState[kSplitLeftOff]);
-        const bool last =
-            left.fetch_add(1, sycl::memory_order::acq_rel) == splitBlocks - 1;
-        if (last) {
-          left.store(0);
-          for (int r = 0; r < kSplitRounds; ++r)
-            splitStore(barriers, r, 0);
-        }
-        smem[4] = last;
-      }
-      sycl::group_barrier(group, sycl::memory_scope::device);
-      const bool last = smem[4] != 0;
-      sycl::group_barrier(group);
-      if (last)
-        topKPerRowJob<kNumThreadsPerBlock, kNumBins, false>(
-            item,
-            slm_,
-            nullptr,
-            rowBase,
-            0,
-            rowLen,
-            outIndices,
-            nullptr,
-            stride1_,
-            topK);
-      return false;
-    };
-
-    const int slice = (rowLen + splitBlocks - 1) / splitBlocks;
-    const int begin = sliceIdx * slice;
-    const int end = sycl::min(begin + slice, rowLen);
-    constexpr int kPerIteration = kNumThreadsPerBlock * kSplitUnroll;
-    const int iterations =
-        (sycl::max(end - begin, 0) + kPerIteration - 1) / kPerIteration;
-    const auto indexOf = [&](int t, int u) {
-      return begin + t * kPerIteration + u * kNumThreadsPerBlock + threadIdx_x;
-    };
-    // Loads are unconditional, clamped into the slice, so that all of an
-    // iteration's loads issue together; the caller masks the clamped ones.
-    const auto keyAt = [&](int i) {
-      return splitKeyOf(rowBase[(i < end ? i : end - 1) * stride1_]);
-    };
-
-    // Clear this launch's global state with atomic stores: these same words are
-    // incremented atomically below, and a plain store can land afterwards.
-    for (int i = threadIdx_x; i < kSplitHistInts; i += kNumThreadsPerBlock)
-      if (i % splitBlocks == sliceIdx) splitStore(rowState, i, 0);
-    if (threadIdx_x == 0 && sliceIdx == 0) {
-      splitStore(cursor, 0, 0);
-      splitStore(tieCursor, 0, 0);
-      splitStore(candCursor, 0, 0);
-      for (int r = 1; r < kSplitRounds; ++r)
-        splitStore(barriers, r, 0);
-    }
-    if (!barrier(0, -1)) return;
-
-    const int copy = threadIdx_x % kHistCopies;
-
-    // Step 0: histogram the slice by the top 11 bits of the key.
-    clearSmemHistogram(item, smemHist, kSplitBins0);
-    for (int t = 0; t < iterations; ++t) {
-      uint32_t key[kSplitUnroll];
-#pragma unroll
-      for (int u = 0; u < kSplitUnroll; ++u)
-        key[u] = keyAt(indexOf(t, u));
-#pragma unroll
-      for (int u = 0; u < kSplitUnroll; ++u)
-        if (indexOf(t, u) < end)
-          SplitLocalAtomic(
-              smemHist[(key[u] >> kSplitShift0) * kHistCopies + copy])
-              .fetch_add(1);
-    }
-    pushSmemHistogram(item, smemHist, hist0, kSplitBins0);
-    if (!barrier(1, 0)) return;
-    splitFindThreshold<kSplitBins0, kNumThreadsPerBlock, true>(
-        item, hist0, topK, smem);
-    const int bin0 = smem[0];
-    const int above0 = smem[1];
-    const int inBin0 = smem[2];
-    const uint32_t prefix1 = static_cast<uint32_t>(bin0) << kSplitShift0;
-
-    // One pass over the slice that emits the elements in play above a step's
-    // threshold bin - up to `limit` on the row's cursor - and collects the ones
-    // inside it, key and index, into the candidate buffer. Elements in play are
-    // those whose bits above the step's digit are `prefix` under `mask`.
-    const auto collect =
-        [&](uint32_t mask, uint32_t prefix, int shift, int bin, int limit) {
-          for (int t = 0; t < iterations; ++t) {
-            uint32_t key[kSplitUnroll];
-            int digit[kSplitUnroll];
-#pragma unroll
-            for (int u = 0; u < kSplitUnroll; ++u) {
-              key[u] = keyAt(indexOf(t, u));
-              digit[u] =
-                  indexOf(t, u) < end && (key[u] & mask) == prefix
-                      ? static_cast<int>((key[u] >> shift) & (kSplitBins1 - 1))
-                      : -1;
-            }
-            int above = 0;
-            int inside = 0;
-#pragma unroll
-            for (int u = 0; u < kSplitUnroll; ++u) {
-              above += digit[u] > bin ? 1 : 0;
-              inside += digit[u] == bin ? 1 : 0;
-            }
-            int slot = splitReserve(sg, cursor, above);
-            if (slot >= 0) {
-#pragma unroll
-              for (int u = 0; u < kSplitUnroll; ++u)
-                if (digit[u] > bin) {
-                  if (slot < limit) outIndices[slot] = indexOf(t, u);
-                  ++slot;
-                }
-            }
-            int kept = splitReserve(sg, candCursor, inside);
-            if (kept >= 0) {
-#pragma unroll
-              for (int u = 0; u < kSplitUnroll; ++u)
-                if (digit[u] == bin) {
-                  if (kept < kSplitCandCap) {
-                    splitStore(candKeys, kept, static_cast<int32_t>(key[u]));
-                    splitStore(candIndices, kept, indexOf(t, u));
-                  }
-                  ++kept;
-                }
-            }
+      // A row whose barrier was abandoned is redone from scratch, by the last
+      // of its groups to leave and with the established single-group job: by
+      // then no other group of the row can still write its output. Every group
+      // of such a row leaves through here, so the count reaches splitBlocks;
+      // and the last one also readies the counters for the next launch, since
+      // no group is left to touch them.
+      bool redo = false;
+      const auto barrier = [&](int round, int clearRound) {
+        if (splitRowBarrier(
+                item, barriers, round, clearRound, splitBlocks, smem + 3))
+          return true;
+        if (threadIdx_x == 0) {
+          SplitGlobalAtomic left(rowState[kSplitLeftOff]);
+          const bool last =
+              left.fetch_add(1, sycl::memory_order::acq_rel) == splitBlocks - 1;
+          if (last) {
+            left.store(0);
+            for (int r = 0; r < kSplitRounds; ++r)
+              splitStore(barriers, r, 0);
           }
-        };
+          smem[4] = last;
+        }
+        sycl::group_barrier(group, sycl::memory_scope::device);
+        const bool last = smem[4] != 0;
+        sycl::group_barrier(group);
+        redo = last;
+        return false;
+      };
 
-    if (inBin0 <= kSplitCandCap) {
-      // The elements still in play after step 0 are only the ones in its
-      // threshold bin, about a thousand for a normal row, so this is the last
-      // pass over the row and the last device-wide barrier.
-      collect(0u, 0u, kSplitShift0, bin0, above0);
-      if (!barrier(2, -1)) return;
-      // The rest of the row is one group's work, so the others are done.
-      if (sliceIdx != 0) return;
-      const int remaining = topK - above0;
-      // Digit 1, over the buffer. A thousand candidates do not contend for the
-      // SLM histogram the way fifty thousand elements do, so this uses a single
-      // copy: nothing to fold, and a quarter of the words to clear.
-      for (int i = threadIdx_x; i < inBin0; i += kNumThreadsPerBlock)
-        smemKeys[i] = splitLoad(candKeys, i);
-      clearSmemBins(item, smemHist, kSplitBins1);
-      for (int i = threadIdx_x; i < inBin0; i += kNumThreadsPerBlock) {
-        const uint32_t key = static_cast<uint32_t>(smemKeys[i]);
-        SplitLocalAtomic(smemHist[(key >> kSplitShift1) & (kSplitBins1 - 1)])
-            .fetch_add(1);
+      const int slice = (rowLen + splitBlocks - 1) / splitBlocks;
+      const int begin = sliceIdx * slice;
+      const int end = sycl::min(begin + slice, rowLen);
+      constexpr int kPerIteration = kNumThreadsPerBlock * kSplitUnroll;
+      const int iterations =
+          (sycl::max(end - begin, 0) + kPerIteration - 1) / kPerIteration;
+      const auto indexOf = [&](int t, int u) {
+        return begin + t * kPerIteration + u * kNumThreadsPerBlock +
+               threadIdx_x;
+      };
+      // Loads are unconditional, clamped into the slice, so that all of an
+      // iteration's loads issue together; the caller masks the clamped ones.
+      const auto keyAt = [&](int i) {
+        return splitKeyOf(rowBase[(i < end ? i : end - 1) * stride1_]);
+      };
+
+      // Clear this launch's global state with atomic stores: these same words
+      // are incremented atomically below, and a plain store can land
+      // afterwards.
+      for (int i = threadIdx_x; i < kSplitHistInts; i += kNumThreadsPerBlock)
+        if (i % splitBlocks == sliceIdx) splitStore(rowState, i, 0);
+      if (threadIdx_x == 0 && sliceIdx == 0) {
+        splitStore(cursor, 0, 0);
+        splitStore(tieCursor, 0, 0);
+        splitStore(candCursor, 0, 0);
+        for (int r = 1; r < kSplitRounds; ++r)
+          splitStore(barriers, r, 0);
       }
-      splitFindThreshold<kSplitBins1, kNumThreadsPerBlock, false>(
-          item, smemHist, remaining, smem);
+      if (!barrier(0, -1)) return redo;
+
+      const int copy = threadIdx_x % kHistCopies;
+
+      // Step 0: histogram the slice by the top 11 bits of the key.
+      clearSmemHistogram(item, smemHist, kSplitBins0);
+      for (int t = 0; t < iterations; ++t) {
+        uint32_t key[kSplitUnroll];
+#pragma unroll
+        for (int u = 0; u < kSplitUnroll; ++u)
+          key[u] = keyAt(indexOf(t, u));
+#pragma unroll
+        for (int u = 0; u < kSplitUnroll; ++u)
+          if (indexOf(t, u) < end)
+            SplitLocalAtomic(
+                smemHist[(key[u] >> kSplitShift0) * kHistCopies + copy])
+                .fetch_add(1);
+      }
+      pushSmemHistogram(item, smemHist, hist0, kSplitBins0);
+      if (!barrier(1, 0)) return redo;
+      splitFindThreshold<kSplitBins0, kNumThreadsPerBlock, true>(
+          item, hist0, topK, smem);
+      const int bin0 = smem[0];
+      const int above0 = smem[1];
+      const int inBin0 = smem[2];
+      const uint32_t prefix1 = static_cast<uint32_t>(bin0) << kSplitShift0;
+
+      // One pass over the slice that emits the elements in play above a step's
+      // threshold bin - up to `limit` on the row's cursor - and collects the
+      // ones inside it, key and index, into the candidate buffer. Elements in
+      // play are those whose bits above the step's digit are `prefix` under
+      // `mask`.
+      const auto collect =
+          [&](uint32_t mask, uint32_t prefix, int shift, int bin, int limit) {
+            for (int t = 0; t < iterations; ++t) {
+              uint32_t key[kSplitUnroll];
+              int digit[kSplitUnroll];
+#pragma unroll
+              for (int u = 0; u < kSplitUnroll; ++u) {
+                key[u] = keyAt(indexOf(t, u));
+                digit[u] = indexOf(t, u) < end && (key[u] & mask) == prefix
+                               ? static_cast<int>(
+                                     (key[u] >> shift) & (kSplitBins1 - 1))
+                               : -1;
+              }
+              int above = 0;
+              int inside = 0;
+#pragma unroll
+              for (int u = 0; u < kSplitUnroll; ++u) {
+                above += digit[u] > bin ? 1 : 0;
+                inside += digit[u] == bin ? 1 : 0;
+              }
+              int slot = splitReserve(sg, cursor, above);
+              if (slot >= 0) {
+#pragma unroll
+                for (int u = 0; u < kSplitUnroll; ++u)
+                  if (digit[u] > bin) {
+                    if (slot < limit) outIndices[slot] = indexOf(t, u);
+                    ++slot;
+                  }
+              }
+              int kept = splitReserve(sg, candCursor, inside);
+              if (kept >= 0) {
+#pragma unroll
+                for (int u = 0; u < kSplitUnroll; ++u)
+                  if (digit[u] == bin) {
+                    if (kept < kSplitCandCap) {
+                      splitStore(candKeys, kept, static_cast<int32_t>(key[u]));
+                      splitStore(candIndices, kept, indexOf(t, u));
+                    }
+                    ++kept;
+                  }
+              }
+            }
+          };
+
+      if (inBin0 <= kSplitCandCap) {
+        // The elements still in play after step 0 are only the ones in its
+        // threshold bin, about a thousand for a normal row, so this is the last
+        // pass over the row and the last device-wide barrier.
+        collect(0u, 0u, kSplitShift0, bin0, above0);
+        if (!barrier(2, -1)) return redo;
+        // The rest of the row is one group's work, so the others are done.
+        if (sliceIdx != 0) return false;
+        const int remaining = topK - above0;
+        // Digit 1, over the buffer. A thousand candidates do not contend for
+        // the SLM histogram the way fifty thousand elements do, so this uses a
+        // single copy: nothing to fold, and a quarter of the words to clear.
+        for (int i = threadIdx_x; i < inBin0; i += kNumThreadsPerBlock)
+          smemKeys[i] = splitLoad(candKeys, i);
+        clearSmemBins(item, smemHist, kSplitBins1);
+        for (int i = threadIdx_x; i < inBin0; i += kNumThreadsPerBlock) {
+          const uint32_t key = static_cast<uint32_t>(smemKeys[i]);
+          SplitLocalAtomic(smemHist[(key >> kSplitShift1) & (kSplitBins1 - 1)])
+              .fetch_add(1);
+        }
+        splitFindThreshold<kSplitBins1, kNumThreadsPerBlock, false>(
+            item, smemHist, remaining, smem);
+        const int bin1 = smem[0];
+        const int above1 = smem[1];
+
+        // Emit the candidates above that bin and histogram the last digit of
+        // the ones inside it, in one pass. The cursor is in SLM now: this group
+        // owns every slot that is left.
+        clearSmemBins(item, smemHist, kSplitBins2);
+        if (threadIdx_x == 0) smem[5] = above0;
+        sycl::group_barrier(group);
+        for (int i = threadIdx_x; i < inBin0; i += kNumThreadsPerBlock) {
+          const uint32_t key = static_cast<uint32_t>(smemKeys[i]);
+          const int digit = (key >> kSplitShift1) & (kSplitBins1 - 1);
+          if (digit > bin1) {
+            const int slot = SplitLocalAtomic(smem[5]).fetch_add(1);
+            if (slot < topK) outIndices[slot] = splitLoad(candIndices, i);
+          } else if (digit == bin1) {
+            SplitLocalAtomic(smemHist[key & (kSplitBins2 - 1)]).fetch_add(1);
+          }
+        }
+        sycl::group_barrier(group);
+        splitFindThreshold<kSplitBins2, kNumThreadsPerBlock, false>(
+            item, smemHist, remaining - above1, smem);
+        const int bin2 = smem[0];
+        const int above2 = smem[1];
+
+        // Everything left at this last bin shares a whole 32-bit key, so it
+        // shares a value and any of it completes the answer - but only after
+        // the elements strictly above it have their slots. Two cursors, so the
+        // equal-key fill cannot take a slot a genuinely larger element owns.
+        const int base2 = above0 + above1;
+        if (threadIdx_x == 0) {
+          smem[5] = base2;
+          smem[6] = base2 + above2;
+        }
+        sycl::group_barrier(group);
+        const uint32_t pattern2 =
+            (static_cast<uint32_t>(bin0) << 11) | static_cast<uint32_t>(bin1);
+        for (int i = threadIdx_x; i < inBin0; i += kNumThreadsPerBlock) {
+          const uint32_t key = static_cast<uint32_t>(smemKeys[i]);
+          if ((key >> kSplitShift1) != pattern2) continue;
+          const int digit = key & (kSplitBins2 - 1);
+          int slot = -1;
+          if (digit > bin2) {
+            slot = SplitLocalAtomic(smem[5]).fetch_add(1);
+            if (slot >= base2 + above2) slot = -1;
+          } else if (digit == bin2) {
+            slot = SplitLocalAtomic(smem[6]).fetch_add(1);
+            if (slot >= topK) slot = -1;
+          }
+          if (slot >= 0) outIndices[slot] = splitLoad(candIndices, i);
+        }
+        return false;
+      }
+
+      // Step 0's threshold bin does not fit the buffer - a row whose winners
+      // sit in one power of two, as a boosted band of logits does. Step 1 takes
+      // a pass of its own: emit what is above step 0's threshold bin and
+      // histogram what is inside it by the next 11 bits.
+      clearSmemHistogram(item, smemHist, kSplitBins1);
+      for (int t = 0; t < iterations; ++t) {
+        uint32_t key[kSplitUnroll];
+        int digit[kSplitUnroll];
+#pragma unroll
+        for (int u = 0; u < kSplitUnroll; ++u) {
+          key[u] = keyAt(indexOf(t, u));
+          digit[u] = indexOf(t, u) < end
+                         ? static_cast<int>(key[u] >> kSplitShift0)
+                         : -1;
+        }
+        int above = 0;
+#pragma unroll
+        for (int u = 0; u < kSplitUnroll; ++u)
+          above += digit[u] > bin0 ? 1 : 0;
+        int slot = splitReserve(sg, cursor, above);
+#pragma unroll
+        for (int u = 0; u < kSplitUnroll; ++u) {
+          if (digit[u] > bin0) {
+            if (slot < above0) outIndices[slot] = indexOf(t, u);
+            ++slot;
+          } else if (digit[u] == bin0) {
+            const int next = (key[u] >> kSplitShift1) & (kSplitBins1 - 1);
+            SplitLocalAtomic(smemHist[next * kHistCopies + copy]).fetch_add(1);
+          }
+        }
+      }
+      pushSmemHistogram(item, smemHist, hist1, kSplitBins1);
+      if (!barrier(2, -1)) return redo;
+      splitFindThreshold<kSplitBins1, kNumThreadsPerBlock, true>(
+          item, hist1, topK - above0, smem);
       const int bin1 = smem[0];
       const int above1 = smem[1];
+      const int inBin1 = smem[2];
+      const uint32_t prefix2 =
+          prefix1 | (static_cast<uint32_t>(bin1) << kSplitShift1);
 
-      // Emit the candidates above that bin and histogram the last digit of the
-      // ones inside it, in one pass. The cursor is in SLM now: this group owns
-      // every slot that is left.
-      clearSmemBins(item, smemHist, kSplitBins2);
-      if (threadIdx_x == 0) smem[5] = above0;
-      sycl::group_barrier(group);
-      for (int i = threadIdx_x; i < inBin0; i += kNumThreadsPerBlock) {
-        const uint32_t key = static_cast<uint32_t>(smemKeys[i]);
-        const int digit = (key >> kSplitShift1) & (kSplitBins1 - 1);
-        if (digit > bin1) {
-          const int slot = SplitLocalAtomic(smem[5]).fetch_add(1);
-          if (slot < topK) outIndices[slot] = splitLoad(candIndices, i);
-        } else if (digit == bin1) {
+      if (inBin1 <= kSplitCandCap) {
+        // Step 1's bin is 2048 times narrower, so it fits for anything short of
+        // a row of near-identical values; finish as above from there.
+        collect(kSplitMask1, prefix1, kSplitShift1, bin1, above0 + above1);
+        if (!barrier(3, -1)) return redo;
+        if (sliceIdx != 0) return false;
+        // The last digit, over the buffer, with the same two-cursor rule.
+        for (int i = threadIdx_x; i < inBin1; i += kNumThreadsPerBlock)
+          smemKeys[i] = splitLoad(candKeys, i);
+        clearSmemBins(item, smemHist, kSplitBins2);
+        for (int i = threadIdx_x; i < inBin1; i += kNumThreadsPerBlock) {
+          const uint32_t key = static_cast<uint32_t>(smemKeys[i]);
           SplitLocalAtomic(smemHist[key & (kSplitBins2 - 1)]).fetch_add(1);
         }
-      }
-      sycl::group_barrier(group);
-      splitFindThreshold<kSplitBins2, kNumThreadsPerBlock, false>(
-          item, smemHist, remaining - above1, smem);
-      const int bin2 = smem[0];
-      const int above2 = smem[1];
-
-      // Everything left at this last bin shares a whole 32-bit key, so it
-      // shares a value and any of it completes the answer - but only after the
-      // elements strictly above it have their slots. Two cursors, so the
-      // equal-key fill cannot take a slot a genuinely larger element owns.
-      const int base2 = above0 + above1;
-      if (threadIdx_x == 0) {
-        smem[5] = base2;
-        smem[6] = base2 + above2;
-      }
-      sycl::group_barrier(group);
-      const uint32_t pattern2 =
-          (static_cast<uint32_t>(bin0) << 11) | static_cast<uint32_t>(bin1);
-      for (int i = threadIdx_x; i < inBin0; i += kNumThreadsPerBlock) {
-        const uint32_t key = static_cast<uint32_t>(smemKeys[i]);
-        if ((key >> kSplitShift1) != pattern2) continue;
-        const int digit = key & (kSplitBins2 - 1);
-        int slot = -1;
-        if (digit > bin2) {
-          slot = SplitLocalAtomic(smem[5]).fetch_add(1);
-          if (slot >= base2 + above2) slot = -1;
-        } else if (digit == bin2) {
-          slot = SplitLocalAtomic(smem[6]).fetch_add(1);
-          if (slot >= topK) slot = -1;
+        splitFindThreshold<kSplitBins2, kNumThreadsPerBlock, false>(
+            item, smemHist, topK - above0 - above1, smem);
+        const int bin2 = smem[0];
+        const int above2 = smem[1];
+        const int base2 = above0 + above1;
+        if (threadIdx_x == 0) {
+          smem[5] = base2;
+          smem[6] = base2 + above2;
         }
-        if (slot >= 0) outIndices[slot] = splitLoad(candIndices, i);
+        sycl::group_barrier(group);
+        for (int i = threadIdx_x; i < inBin1; i += kNumThreadsPerBlock) {
+          const int digit = smemKeys[i] & (kSplitBins2 - 1);
+          int slot = -1;
+          if (digit > bin2) {
+            slot = SplitLocalAtomic(smem[5]).fetch_add(1);
+            if (slot >= base2 + above2) slot = -1;
+          } else if (digit == bin2) {
+            slot = SplitLocalAtomic(smem[6]).fetch_add(1);
+            if (slot >= topK) slot = -1;
+          }
+          if (slot >= 0) outIndices[slot] = splitLoad(candIndices, i);
+        }
+        return false;
       }
-      return;
-    }
 
-    // Step 0's threshold bin does not fit the buffer - a row whose winners sit
-    // in one power of two, as a boosted band of logits does. Step 1 takes a
-    // pass of its own: emit what is above step 0's threshold bin and histogram
-    // what is inside it by the next 11 bits.
-    clearSmemHistogram(item, smemHist, kSplitBins1);
-    for (int t = 0; t < iterations; ++t) {
-      uint32_t key[kSplitUnroll];
-      int digit[kSplitUnroll];
-#pragma unroll
-      for (int u = 0; u < kSplitUnroll; ++u) {
-        key[u] = keyAt(indexOf(t, u));
-        digit[u] =
-            indexOf(t, u) < end ? static_cast<int>(key[u] >> kSplitShift0) : -1;
-      }
-      int above = 0;
-#pragma unroll
-      for (int u = 0; u < kSplitUnroll; ++u)
-        above += digit[u] > bin0 ? 1 : 0;
-      int slot = splitReserve(sg, cursor, above);
-#pragma unroll
-      for (int u = 0; u < kSplitUnroll; ++u) {
-        if (digit[u] > bin0) {
-          if (slot < above0) outIndices[slot] = indexOf(t, u);
-          ++slot;
-        } else if (digit[u] == bin0) {
-          const int next = (key[u] >> kSplitShift1) & (kSplitBins1 - 1);
+      // More than the buffer holds share their top 22 bits: a pass per digit.
+      clearSmemHistogram(item, smemHist, kSplitBins2);
+      for (int i = begin + threadIdx_x; i < end; i += kNumThreadsPerBlock) {
+        const uint32_t key = splitKeyOf(rowBase[i * stride1_]);
+        if ((key & kSplitMask1) != prefix1) continue;
+        const int digit = (key >> kSplitShift1) & (kSplitBins1 - 1);
+        if (digit > bin1) {
+          emit(cursor, outIndices, i, above0 + above1);
+        } else if (digit == bin1) {
+          const int next = key & (kSplitBins2 - 1);
           SplitLocalAtomic(smemHist[next * kHistCopies + copy]).fetch_add(1);
         }
       }
-    }
-    pushSmemHistogram(item, smemHist, hist1, kSplitBins1);
-    if (!barrier(2, -1)) return;
-    splitFindThreshold<kSplitBins1, kNumThreadsPerBlock, true>(
-        item, hist1, topK - above0, smem);
-    const int bin1 = smem[0];
-    const int above1 = smem[1];
-    const int inBin1 = smem[2];
-    const uint32_t prefix2 =
-        prefix1 | (static_cast<uint32_t>(bin1) << kSplitShift1);
-
-    if (inBin1 <= kSplitCandCap) {
-      // Step 1's bin is 2048 times narrower, so it fits for anything short of
-      // a row of near-identical values; finish as above from there.
-      collect(kSplitMask1, prefix1, kSplitShift1, bin1, above0 + above1);
-      if (!barrier(3, -1)) return;
-      if (sliceIdx != 0) return;
-      // The last digit, over the buffer, with the same two-cursor rule.
-      for (int i = threadIdx_x; i < inBin1; i += kNumThreadsPerBlock)
-        smemKeys[i] = splitLoad(candKeys, i);
-      clearSmemBins(item, smemHist, kSplitBins2);
-      for (int i = threadIdx_x; i < inBin1; i += kNumThreadsPerBlock) {
-        const uint32_t key = static_cast<uint32_t>(smemKeys[i]);
-        SplitLocalAtomic(smemHist[key & (kSplitBins2 - 1)]).fetch_add(1);
-      }
-      splitFindThreshold<kSplitBins2, kNumThreadsPerBlock, false>(
-          item, smemHist, topK - above0 - above1, smem);
+      pushSmemHistogram(item, smemHist, hist2, kSplitBins2);
+      if (!barrier(3, -1)) return redo;
+      splitFindThreshold<kSplitBins2, kNumThreadsPerBlock, true>(
+          item, hist2, topK - above0 - above1, smem);
       const int bin2 = smem[0];
       const int above2 = smem[1];
-      const int base2 = above0 + above1;
-      if (threadIdx_x == 0) {
-        smem[5] = base2;
-        smem[6] = base2 + above2;
-      }
-      sycl::group_barrier(group);
-      for (int i = threadIdx_x; i < inBin1; i += kNumThreadsPerBlock) {
-        const int digit = smemKeys[i] & (kSplitBins2 - 1);
-        int slot = -1;
+
+      // Everything left at the last bin shares a whole 32-bit key, so it shares
+      // a value and any of it completes the answer - but only after the
+      // elements strictly above it have their slots. Two cursors, so the
+      // equal-key fill cannot take a slot a genuinely larger element owns.
+      const int base2 = above0 + above1 + above2;
+      for (int i = begin + threadIdx_x; i < end; i += kNumThreadsPerBlock) {
+        const uint32_t key = splitKeyOf(rowBase[i * stride1_]);
+        if ((key & kSplitMask2) != prefix2) continue;
+        const int digit = key & (kSplitBins2 - 1);
         if (digit > bin2) {
-          slot = SplitLocalAtomic(smem[5]).fetch_add(1);
-          if (slot >= base2 + above2) slot = -1;
+          emit(cursor, outIndices, i, base2);
         } else if (digit == bin2) {
-          slot = SplitLocalAtomic(smem[6]).fetch_add(1);
-          if (slot >= topK) slot = -1;
+          const int slot = base2 + SplitGlobalAtomic(*tieCursor).fetch_add(1);
+          if (slot < topK) outIndices[slot] = i;
         }
-        if (slot >= 0) outIndices[slot] = splitLoad(candIndices, i);
       }
-      return;
-    }
-
-    // More than the buffer holds share their top 22 bits: a pass per digit.
-    clearSmemHistogram(item, smemHist, kSplitBins2);
-    for (int i = begin + threadIdx_x; i < end; i += kNumThreadsPerBlock) {
-      const uint32_t key = splitKeyOf(rowBase[i * stride1_]);
-      if ((key & kSplitMask1) != prefix1) continue;
-      const int digit = (key >> kSplitShift1) & (kSplitBins1 - 1);
-      if (digit > bin1) {
-        emit(cursor, outIndices, i, above0 + above1);
-      } else if (digit == bin1) {
-        const int next = key & (kSplitBins2 - 1);
-        SplitLocalAtomic(smemHist[next * kHistCopies + copy]).fetch_add(1);
-      }
-    }
-    pushSmemHistogram(item, smemHist, hist2, kSplitBins2);
-    if (!barrier(3, -1)) return;
-    splitFindThreshold<kSplitBins2, kNumThreadsPerBlock, true>(
-        item, hist2, topK - above0 - above1, smem);
-    const int bin2 = smem[0];
-    const int above2 = smem[1];
-
-    // Everything left at the last bin shares a whole 32-bit key, so it shares
-    // a value and any of it completes the answer - but only after the elements
-    // strictly above it have their slots. Two cursors, so the equal-key fill
-    // cannot take a slot a genuinely larger element owns.
-    const int base2 = above0 + above1 + above2;
-    for (int i = begin + threadIdx_x; i < end; i += kNumThreadsPerBlock) {
-      const uint32_t key = splitKeyOf(rowBase[i * stride1_]);
-      if ((key & kSplitMask2) != prefix2) continue;
-      const int digit = key & (kSplitBins2 - 1);
-      if (digit > bin2) {
-        emit(cursor, outIndices, i, base2);
-      } else if (digit == bin2) {
-        const int slot = base2 + SplitGlobalAtomic(*tieCursor).fetch_add(1);
-        if (slot < topK) outIndices[slot] = i;
-      }
-    }
+      return false;
+    };
+    if (rowLen < minRowLen_ ? sliceIdx == 0 : splitRow())
+      topKPerRowJob<kNumThreadsPerBlock, kNumBins, false>(
+          item,
+          slm_,
+          nullptr,
+          rowBase,
+          0,
+          rowLen,
+          outIndices,
+          nullptr,
+          stride1_,
+          topK);
   }
 
  private:
@@ -3636,7 +3773,12 @@ static int32_t* splitRowWorkspace(const at::Device& device, int64_t numRows) {
 // (1x300k, 4x256k, 8x128k, 16x128k, 8x512k); and never fewer than four a row.
 // The width is only an upper bound on the row's real length - the kernel leaves
 // idle the groups a shorter row does not need.
-static inline int splitBlocksForDecode(int64_t numRows, int64_t numColumns) {
+//
+// The groups of a row wait for each other at the barriers, so they all have to
+// be resident at once: maxResident, the work-groups the device holds, caps the
+// total, and a row that cannot get kMinBlocksPerRow of it is not split.
+static inline int
+splitBlocksForDecode(int64_t numRows, int64_t numColumns, int64_t maxResident) {
   constexpr int kMinTotalBlocks = 32;
   constexpr int kMaxTotalBlocks = 64;
   constexpr int kLongSliceLen = 16384;
@@ -3647,11 +3789,27 @@ static inline int splitBlocksForDecode(int64_t numRows, int64_t numColumns) {
   if (numRows <= 0 || numRows > kMaxSplitRows ||
       numColumns < splitMinRowLen(numRows))
     return 1;
+  const int64_t maxBlocks =
+      std::min<int64_t>(kMaxTotalBlocks, maxResident) / numRows;
+  if (maxBlocks < kMinBlocksPerRow) return 1;
   const int64_t wanted =
       std::max<int64_t>(kMinTotalBlocks / numRows, numColumns / kLongSliceLen);
-  const int64_t blocks = std::max<int64_t>(
-      std::min<int64_t>(wanted, kMaxTotalBlocks / numRows), kMinBlocksPerRow);
+  const int64_t blocks =
+      std::max<int64_t>(std::min<int64_t>(wanted, maxBlocks), kMinBlocksPerRow);
   return static_cast<int>(blocks);
+}
+
+// The work-groups of slmBytes each the device holds at once, for the split
+// decode kernel: per Xe core, as many as its SLM fits, but at most what its
+// threads fit at 256 registers - 8 vector engines of 4 threads, i.e. two
+// work-groups of kNumThreadsPerBlock / SUBGROUP_SIZE = 16 threads.
+static int64_t splitMaxResident(const sycl::queue& queue, size_t slmBytes) {
+  constexpr int64_t kLargeGrfThreadsPerXeCore = 32;
+  constexpr int64_t kThreadsPerGroup = 512 / SUBGROUP_SIZE;
+  const auto& info = topKDeviceInfo(queue);
+  const int64_t bySlm = static_cast<int64_t>(info.slmPerXeCore / slmBytes);
+  return info.xeCores *
+         std::min(bySlm, kLargeGrfThreadsPerXeCore / kThreadsPerGroup);
 }
 
 // Medium rows need considerably less scratch than the long-row fallback.
@@ -3812,6 +3970,7 @@ void top_k_per_row_decode(
   constexpr int kSplitWorkThreshold = 200 * 1000;
   constexpr int kNumThreadsPerBlock = 512;
   auto& queue = vllm::xpu::vllmGetQueue();
+  const bool longHist = vllm::hasLongHist(queue);
   const at::DeviceGuard device_guard(logits.device());
 
   const auto numColumns = logits.size(1);
@@ -3847,18 +4006,18 @@ void top_k_per_row_decode(
 
   // Rows long enough that one work-group per row leaves the machine idle are
   // split over several groups that cooperate inside a single launch.
-  const int splitBlocks = vllm::splitBlocksForDecode(numRows, numColumns);
+  // The split path's SLM, or the single-group job's for a short row.
+  const size_t splitSlmBytes = std::max(
+      vllm::kSplitSlmInts * sizeof(int32_t),
+      vllm::deviceSharedMemorySize(longHist, topK));
+  const int splitBlocks = vllm::splitBlocksForDecode(
+      numRows, numColumns, vllm::splitMaxResident(queue, splitSlmBytes));
   if (splitBlocks > 1) {
     int32_t* workspace = vllm::splitRowWorkspace(logits.device(), numRows);
     sycl::range<3> grid(splitBlocks, numRows, 1);
     sycl::range<3> block(kNumThreadsPerBlock, 1, 1);
     queue.submit([&](sycl::handler& cgh) {
-      // The split path's SLM, or the single-group job's for a short row.
-      sycl::local_accessor<char, 1> slm(
-          sycl::range<1>(std::max(
-              vllm::kSplitSlmInts * sizeof(int32_t),
-              vllm::sharedMemorySize(topK))),
-          cgh);
+      sycl::local_accessor<char, 1> slm(sycl::range<1>(splitSlmBytes), cgh);
       cgh.parallel_for(
           sycl::nd_range<3>(grid * block, block),
           vllm::top_k_per_row_decode_split_kernel<kNumThreadsPerBlock>(
@@ -3881,44 +4040,48 @@ void top_k_per_row_decode(
     // Use insertion sort
     sycl::range<3> grid(numRows, 1, 1);
     sycl::range<3> block(kNumThreadsPerBlock, 1, 1);
-    size_t dynamic_smem_in_bytes = vllm::sharedMemorySize(topK);
+    size_t dynamic_smem_in_bytes = vllm::deviceSharedMemorySize(longHist, topK);
     queue.submit([&](sycl::handler& cgh) {
       // SLM allocation
       sycl::local_accessor<char, 1> slm(
           sycl::range<1>(dynamic_smem_in_bytes), cgh);
       cgh.parallel_for(
           sycl::nd_range<3>(grid * block, block),
-          vllm::top_k_per_row_decode_kernel<kNumThreadsPerBlock, false>(
+          vllm::top_k_per_row_prefill_kernel<kNumThreadsPerBlock, false>(
               slm,
-              logits.data_ptr<float>(),
-              seqLens.data_ptr<int>(),
               indices.data_ptr<int>(),
+              logits.data_ptr<float>(),
+              /*rowStart=*/nullptr,
+              /*rowEnd=*/nullptr,
               stride0,
               stride1,
               topK,
+              /*offsetIndex=*/0,
+              seqLens.data_ptr<int>(),
               next_n));
     });
   } else if (numColumns < kSplitWorkThreshold) {
     // From this threshold, use radix sort instead
     sycl::range<3> grid(numRows, 1, 1);
     sycl::range<3> block(kNumThreadsPerBlock, 1, 1);
-    size_t dynamic_smem_in_bytes = vllm::sharedMemorySize(topK);
+    size_t dynamic_smem_in_bytes = vllm::deviceSharedMemorySize(longHist, topK);
     queue.submit([&](sycl::handler& cgh) {
       // SLM allocation
       sycl::local_accessor<char, 1> slm(
           sycl::range<1>(dynamic_smem_in_bytes), cgh);
       cgh.parallel_for(
           sycl::nd_range<3>(grid * block, block),
-          vllm::top_k_per_row_decode_kernel<
-              kNumThreadsPerBlock,
-              false /*TODO true*/>(
+          vllm::top_k_per_row_prefill_kernel<kNumThreadsPerBlock, false>(
               slm,
-              logits.data_ptr<float>(),
-              seqLens.data_ptr<int>(),
               indices.data_ptr<int>(),
+              logits.data_ptr<float>(),
+              /*rowStart=*/nullptr,
+              /*rowEnd=*/nullptr,
               stride0,
               stride1,
               topK,
+              /*offsetIndex=*/0,
+              seqLens.data_ptr<int>(),
               next_n));
     });
   } else {
@@ -3935,7 +4098,7 @@ void top_k_per_row_decode(
     // Step 1: each row is processed by multiple blocks
     sycl::range<3> grid_step1(numRows, multipleBlocksPerRowConfig, 1);
     sycl::range<3> block_step1(kNumThreadsPerBlock, 1, 1);
-    size_t dynamic_smem_in_bytes_step1 = vllm::sharedMemorySize(topK, true);
+    size_t dynamic_smem_in_bytes_step1 = vllm::stepSharedMemorySize(topK, true);
     queue.submit([&](sycl::handler& cgh) {
       // SLM allocation
       sycl::local_accessor<char, 1> slm(
@@ -3961,7 +4124,7 @@ void top_k_per_row_decode(
     constexpr int kNumThreadsPerBlockMerge = 1024;
     sycl::range<3> grid_step2(numRows, 1, 1);
     sycl::range<3> block_step2(kNumThreadsPerBlockMerge, 1, 1);
-    size_t dynamic_smem_in_bytes_step2 = vllm::sharedMemorySize(topK);
+    size_t dynamic_smem_in_bytes_step2 = vllm::stepSharedMemorySize(topK);
     queue.submit([&](sycl::handler& cgh) {
       // SLM allocation
       sycl::local_accessor<char, 1> slm(
@@ -4013,6 +4176,7 @@ void top_k_per_row_prefill(
   constexpr int kSortingAlgorithmThreshold = 12288;
   constexpr int kNumThreadsPerBlock = 512;
   auto& queue = vllm::xpu::vllmGetQueue();
+  const bool longHist = vllm::hasLongHist(queue);
   const at::DeviceGuard device_guard(logits.device());
 
   if (numRows > 0 && logits.size(1) > 4096 &&
@@ -4034,34 +4198,11 @@ void top_k_per_row_prefill(
       std::min(static_cast<int>(numRows), kSortingAlgorithmThreshold);
   int64_t rowOffset = 0;
 
-  size_t dynamic_smem_in_bytes = vllm::sharedMemorySize(topK);
+  size_t dynamic_smem_in_bytes = vllm::deviceSharedMemorySize(longHist, topK);
 
-  // Whole groups of kRowsPerGroup rows go to the grouped kernel, the last few
-  // rows to the single-row one.
-  int numGroups = 0;
-  if (numGroups > 0) {
-    sycl::range<3> grid_group(numGroups, 1, 1);
-    sycl::range<3> block_group(kNumThreadsPerBlock, 1, 1);
-    queue.submit([&](sycl::handler& cgh) {
-      sycl::local_accessor<char, 1> slm(
-          sycl::range<1>(dynamic_smem_in_bytes), cgh);
-      cgh.parallel_for(
-          sycl::nd_range<3>(grid_group * block_group, block_group),
-          vllm::top_k_per_row_prefill_group_kernel<kNumThreadsPerBlock>(
-              slm,
-              indices.data_ptr<int32_t>(),
-              logits.data_ptr<float>(),
-              rowStarts.data_ptr<int32_t>(),
-              rowEnds.data_ptr<int32_t>(),
-              stride0,
-              stride1,
-              topK,
-              rowOffset));
-    });
-    const int grouped_rows = numGroups * vllm::kRowsPerGroup;
-    rowOffset += grouped_rows;
-    numInsertionBlocks -= grouped_rows;
-  }
+  // The grouped kernel (top_k_per_row_prefill_group_kernel) ran long rows
+  // serially and is disabled, so it is not launched, which also keeps it out of
+  // the binary.
 
   // For small input sizes, we only launch insertion sort kernels.
   sycl::range<3> grid(std::max(numInsertionBlocks, 1), 1, 1);
