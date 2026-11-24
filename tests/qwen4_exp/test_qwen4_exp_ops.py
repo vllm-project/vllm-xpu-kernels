@@ -451,6 +451,30 @@ def test_ple_conv_rejects_tokens_without_requests():
         )
 
 
+def test_ple_conv_rejects_aliased_tensors():
+    inputs = torch.ones(2, 4, dtype=torch.bfloat16, device=DEVICE)
+    state = torch.zeros(1, 4, 1, dtype=torch.bfloat16, device=DEVICE)
+    weights = torch.ones(4, 2, dtype=torch.bfloat16, device=DEVICE)
+    indices = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+    kwargs = dict(
+        mode="prefill",
+        dilation=1,
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32, device=DEVICE),
+        has_initial_states=torch.zeros(1, dtype=torch.bool, device=DEVICE),
+    )
+    with pytest.raises(RuntimeError, match="single memory location"):
+        ple_conv(inputs, state, weights, indices, output=inputs, **kwargs)
+    with pytest.raises(RuntimeError, match="single memory location"):
+        ple_conv(
+            state.view(1, 4),
+            state,
+            weights,
+            torch.zeros(1, dtype=torch.int32, device=DEVICE),
+            mode="decode",
+            dilation=1,
+        )
+
+
 @pytest.mark.parametrize("state_id", [0, -1, 3])
 @pytest.mark.parametrize("mode", ["decode", "prefill"])
 def test_ple_conv_preserves_null_and_out_of_range_state_slots(state_id, mode):
@@ -506,6 +530,10 @@ def test_qsa_visibility_and_expansion_at_2048_budget():
     block_topk = token_topk // compress_ratio
     blocks = torch.arange(block_topk, dtype=torch.int32).repeat(4, 1)
     blocks[2, -3:] = -1
+    # Blocks past the causal boundary (visible = 1024 for row 1, 6 for
+    # row 3) must not be expanded even if they are inside the sequence.
+    blocks[1, 0] = 1500
+    blocks[3, 1] = 6
 
     expected_visible = torch.tensor([1, 1024, 2048, 6], dtype=torch.int32)
     actual_visible = qsa_visible_blocks(
@@ -525,16 +553,16 @@ def test_qsa_visibility_and_expansion_at_2048_budget():
         request = int(token_to_request[row])
         sequence_length = int(sequence_lengths[request])
         query_position = int(query_positions[row])
-        complete_blocks = min(
+        visible_blocks = min(
             (query_position + 1) // compress_ratio,
             sequence_length // compress_ratio,
-            block_topk,
         )
+        complete_blocks = min(visible_blocks, block_topk)
         expanded_count = complete_blocks * compress_ratio
         for column in range(expanded_count):
             block = int(blocks[row, column // compress_ratio])
             token = block * compress_ratio + column % compress_ratio
-            if block >= 0 and token < sequence_length:
+            if 0 <= block < visible_blocks and token < sequence_length:
                 expected[row, column] = token
         tail_start = (
             (query_position + 1) // compress_ratio * compress_ratio

@@ -3,6 +3,7 @@
 #include "xpu/qwen4_exp/qwen4_exp_ops.h"
 
 #include <ATen/DeviceGuard.h>
+#include <ATen/MemoryOverlap.h>
 #include <c10/xpu/XPUStream.h>
 #include <sycl/sycl.hpp>
 
@@ -612,11 +613,11 @@ class QsaExpandBlockIndicesKernel {
     }
     const int64_t sequence_length = sequence_lengths_[request];
     const int64_t query_position = query_positions_[row];
-    const int64_t complete_blocks = sycl::min<int64_t>(
-        sycl::min<int64_t>(
-            (query_position + 1) / compress_ratio_,
-            sequence_length / compress_ratio_),
-        block_topk_);
+    const int64_t visible_blocks = sycl::min<int64_t>(
+        (query_position + 1) / compress_ratio_,
+        sequence_length / compress_ratio_);
+    const int64_t complete_blocks =
+        sycl::min<int64_t>(visible_blocks, block_topk_);
     const int64_t expanded_count = complete_blocks * compress_ratio_;
     const int64_t tail_start =
         ((query_position + 1) / compress_ratio_) * compress_ratio_;
@@ -627,7 +628,8 @@ class QsaExpandBlockIndicesKernel {
       const int64_t block_rank = column / compress_ratio_;
       const int64_t offset = column % compress_ratio_;
       const int32_t block = block_indices_[row * block_topk_ + block_rank];
-      if (block >= 0) {
+      // Blocks past the query's causal boundary must not be expanded.
+      if (block >= 0 && block < visible_blocks) {
         token = static_cast<int64_t>(block) * compress_ratio_ + offset;
       }
     } else {
@@ -963,6 +965,11 @@ void qwen4_exp_ple_conv(
           conv_weights.is_contiguous() && state_indices.is_contiguous(),
       "PLE convolution input, output, weights, and indices must be "
       "contiguous");
+  // The writeback kernel reads raw inputs after the convolution writes
+  // output, and both read/write conv_state, so none of them may alias.
+  at::assert_no_overlap(output, inputs);
+  at::assert_no_overlap(output, conv_state);
+  at::assert_no_overlap(inputs, conv_state);
   // The kernels address conv_state purely through its strides, so either the
   // window (ds, stride(2)==1) or the channel (sd, stride(1)==1) axis may be
   // innermost.
