@@ -1,39 +1,14 @@
 #include <sycl/sycl.hpp>
 #include "utils.h"
 #include "dispatch_utils.h"
+#include "xpu/sycl/rotary_embedding.hpp"
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <c10/macros/Macros.h>
+#include "sycl_launch.h"
 
 namespace vllm {
-
-template <typename scalar_t, bool IS_NEOX>
-inline void apply_token_rotary_embedding(
-    scalar_t* __restrict__ arr,
-    const scalar_t* __restrict__ cos_ptr,
-    const scalar_t* __restrict__ sin_ptr,
-    int rot_offset,
-    int embed_dim) {
-  int x_index, y_index;
-  scalar_t cos, sin;
-  if (IS_NEOX) {
-    // GPT-NeoX style rotary embedding.
-    x_index = rot_offset;
-    y_index = embed_dim + rot_offset;
-    cos = cos_ptr[x_index];
-    sin = sin_ptr[x_index];
-  } else {
-    // GPT-J style rotary embedding.
-    x_index = 2 * rot_offset;
-    y_index = 2 * rot_offset + 1;
-    cos = cos_ptr[x_index / 2];
-    sin = sin_ptr[x_index / 2];
-  }
-
-  const scalar_t x = arr[x_index];
-  const scalar_t y = arr[y_index];
-  arr[x_index] = x * cos - y * sin;
-  arr[y_index] = y * cos + x * sin;
-}
 
 template <typename scalar_t, bool IS_NEOX>
 inline void apply_rotary_embedding(
@@ -66,7 +41,12 @@ inline void apply_rotary_embedding(
         token_idx * query_stride + head_idx * head_stride;
     const int rot_offset = i % embed_dim;
     apply_token_rotary_embedding<scalar_t, IS_NEOX>(
-        query + token_head, cos_ptr, sin_ptr, rot_offset, embed_dim);
+        query + token_head,
+        query + token_head,
+        cos_ptr,
+        sin_ptr,
+        rot_offset,
+        embed_dim);
   }
 
   if (key != nullptr) {
@@ -78,7 +58,12 @@ inline void apply_rotary_embedding(
           token_idx * key_stride + head_idx * head_stride;
       const int rot_offset = i % embed_dim;
       apply_token_rotary_embedding<scalar_t, IS_NEOX>(
-          key + token_head, cos_ptr, sin_ptr, rot_offset, embed_dim);
+          key + token_head,
+          key + token_head,
+          cos_ptr,
+          sin_ptr,
+          rot_offset,
+          embed_dim);
     }
   }
 }
@@ -160,7 +145,258 @@ class rotary_embedding_kernel {
   const int head_size;
 };
 
+// Vectorized rotary embedding.
+//
+// The reference kernel above maps one work-group to one token and lets every
+// work-item rotate a single (x, y) element pair.  On Crescent Island that is
+// heavily memory-latency bound: each work-item only issues 2-byte accesses,
+// so a 32-wide sub-group requests 64 bytes per message instead of the 512
+// bytes a fully vectorized sub-group can move, and the number of resident
+// work-groups is pinned to the token count rather than to the 32 Xe cores.
+//
+// This kernel instead flattens (token, head, rot_offset) for query *and* key
+// into a single 1-D index space where each work-item owns VEC_SIZE contiguous
+// rotation offsets.  With VEC_SIZE * sizeof(scalar_t) == kRopeVecBytes every
+// sub-group lane contributes a full-width access, query and key are drained by
+// one dispatch, and the grid is sized by total work instead of token count.
+template <typename scalar_t, bool IS_NEOX, int VEC_SIZE>
+class rotary_embedding_vec_kernel {
+ public:
+  rotary_embedding_vec_kernel(
+      const int64_t* __restrict__ positions_,
+      scalar_t* __restrict__ query_,
+      scalar_t* __restrict__ key_,
+      const scalar_t* __restrict__ cos_sin_cache_,
+      const int rot_dim_,
+      const int64_t query_stride_,
+      const int64_t key_stride_,
+      const int64_t head_stride_,
+      const int vecs_per_head_,
+      const int query_vecs_per_token_,
+      const int vecs_per_token_,
+      const int total_vecs_)
+      : positions(positions_),
+        query(query_),
+        key(key_),
+        cos_sin_cache(cos_sin_cache_),
+        rot_dim(rot_dim_),
+        query_stride(query_stride_),
+        key_stride(key_stride_),
+        head_stride(head_stride_),
+        vecs_per_head(vecs_per_head_),
+        query_vecs_per_token(query_vecs_per_token_),
+        vecs_per_token(vecs_per_token_),
+        total_vecs(total_vecs_) {}
+
+  void operator() [[sycl::reqd_sub_group_size(32)]] (
+      const sycl::nd_item<1>& item_ct1) const {
+    const int idx = static_cast<int>(item_ct1.get_global_id(0));
+    if (idx >= total_vecs) return;
+
+    const int token_idx = idx / vecs_per_token;
+    int rem = idx - token_idx * vecs_per_token;
+
+    // The first query_vecs_per_token slots of a token belong to the query
+    // tensor, the remainder (if any) to the key tensor.
+    scalar_t* __restrict__ base;
+    int64_t token_stride;
+    if (rem < query_vecs_per_token) {
+      base = query;
+      token_stride = query_stride;
+    } else {
+      base = key;
+      token_stride = key_stride;
+      rem -= query_vecs_per_token;
+    }
+
+    const int head_idx = rem / vecs_per_head;
+    const int rot_offset = (rem - head_idx * vecs_per_head) * VEC_SIZE;
+
+    const int embed_dim = rot_dim >> 1;
+    const int64_t pos = positions[token_idx];
+    const scalar_t* __restrict__ cos_ptr = cos_sin_cache + pos * rot_dim;
+    scalar_t* __restrict__ ptr =
+        base + token_idx * token_stride + head_idx * head_stride;
+
+    if constexpr (IS_NEOX) {
+      apply_token_rotary_embedding_vec<scalar_t, VEC_SIZE>(
+          ptr, ptr, cos_ptr, cos_ptr + embed_dim, rot_offset, embed_dim);
+    } else {
+      apply_token_rotary_embedding_gptj_vec<scalar_t, VEC_SIZE>(
+          ptr, ptr, cos_ptr, cos_ptr + embed_dim, rot_offset);
+    }
+  }
+
+ private:
+  const int64_t* __restrict__ positions;
+  scalar_t* __restrict__ query;
+  scalar_t* __restrict__ key;
+  const scalar_t* __restrict__ cos_sin_cache;
+  const int rot_dim;
+  const int64_t query_stride;
+  const int64_t key_stride;
+  const int64_t head_stride;
+  const int vecs_per_head;
+  const int query_vecs_per_token;
+  const int vecs_per_token;
+  const int total_vecs;
+};
+
 }  // namespace vllm
+
+namespace {
+
+// Tuned on Crescent Island (32 Xe cores / 256 XVEs, sub-group size 32).
+//
+// Widest access to try first (kRopeVecBytes), then the work-group size, both
+// picked from the size of the rotary slice (x and y halves of q and k):
+//   - over twice the LLC (streaming from DRAM): 16 bytes, 1024-wide groups;
+//   - up to kRopeVecSmallPairs rotation pairs (decode-sized): 16 bytes, 256;
+//   - otherwise (LLC resident): the previous 32 bytes, 256.
+constexpr int kRopeVecBytes = 32;
+constexpr int kRopeVecSmallBytes = 16;
+constexpr int64_t kRopeVecSmallPairs = int64_t(1) << 19;
+constexpr int kRopeVecWorkGroupSize = 256;
+constexpr int kRopeVecStreamWorkGroupSize = 1024;
+
+// Queried once: assumes every XPU in the process is the same model.
+inline int64_t rope_llc_bytes(const sycl::queue& queue) {
+  static const int64_t llc = static_cast<int64_t>(
+      queue.get_device().get_info<sycl::info::device::global_mem_cache_size>());
+  return llc;
+}
+
+// The vec kernel requires 32-wide sub-groups, so a work-group also has to fit
+// in max_num_sub_groups of them.
+inline int rope_stream_work_group_size(const sycl::queue& queue) {
+  static const int wg = [&] {
+    const auto device = queue.get_device();
+    return static_cast<int>(std::min<size_t>(
+        {static_cast<size_t>(kRopeVecStreamWorkGroupSize),
+         device.get_info<sycl::info::device::max_work_group_size>(),
+         static_cast<size_t>(
+             device.get_info<sycl::info::device::max_num_sub_groups>()) *
+             32}));
+  }();
+  return wg;
+}
+
+struct RopeVecLaunch {
+  int max_bytes;
+  int work_group;
+};
+
+inline RopeVecLaunch
+rope_vec_launch(const sycl::queue& queue, int64_t rot_pairs, int elem_bytes) {
+  if (rot_pairs * 2 * elem_bytes > 2 * rope_llc_bytes(queue))
+    return {kRopeVecSmallBytes, rope_stream_work_group_size(queue)};
+  if (rot_pairs <= kRopeVecSmallPairs)
+    return {kRopeVecSmallBytes, kRopeVecWorkGroupSize};
+  return {kRopeVecBytes, kRopeVecWorkGroupSize};
+}
+
+template <typename sycl_t, bool IS_NEOX, int VEC_SIZE>
+bool try_launch_rotary_embedding_vec(
+    int wg,
+    sycl::queue& queue,
+    const int64_t* positions_ptr,
+    sycl_t* query_ptr,
+    sycl_t* key_ptr,
+    const sycl_t* cos_sin_cache_ptr,
+    int64_t num_tokens,
+    int rot_dim,
+    int64_t query_stride,
+    int64_t key_stride,
+    int64_t head_stride,
+    int num_heads,
+    int num_kv_heads) {
+  const int embed_dim = rot_dim / 2;
+  if (embed_dim % VEC_SIZE != 0) return false;
+
+  // NeoX touches VEC_SIZE contiguous elements at two offsets that are both
+  // VEC_SIZE-aligned; GPT-J touches 2 * VEC_SIZE contiguous elements.
+  constexpr int kElemAlign = IS_NEOX ? VEC_SIZE : 2 * VEC_SIZE;
+  constexpr uintptr_t kByteAlign = kElemAlign * sizeof(sycl_t);
+  constexpr uintptr_t kCacheByteAlign = VEC_SIZE * sizeof(sycl_t);
+
+  if (query_stride % kElemAlign != 0 || head_stride % kElemAlign != 0)
+    return false;
+  if (reinterpret_cast<uintptr_t>(query_ptr) % kByteAlign != 0) return false;
+  if (key_ptr != nullptr) {
+    if (key_stride % kElemAlign != 0) return false;
+    if (reinterpret_cast<uintptr_t>(key_ptr) % kByteAlign != 0) return false;
+  }
+  if (reinterpret_cast<uintptr_t>(cos_sin_cache_ptr) % kCacheByteAlign != 0)
+    return false;
+
+  const int vecs_per_head = embed_dim / VEC_SIZE;
+  const int64_t query_vecs_per_token =
+      static_cast<int64_t>(num_heads) * vecs_per_head;
+  const int64_t key_vecs_per_token =
+      key_ptr != nullptr ? static_cast<int64_t>(num_kv_heads) * vecs_per_head
+                         : 0;
+  const int64_t vecs_per_token = query_vecs_per_token + key_vecs_per_token;
+  const int64_t total_vecs = num_tokens * vecs_per_token;
+  if (total_vecs <= 0) return false;
+  // The kernel indexes with 32-bit math to keep the per-work-item divisions
+  // cheap; fall back to the reference kernel when the padded global range
+  // would not fit in int.
+  if (total_vecs > std::numeric_limits<int>::max() - wg) return false;
+
+  const size_t global =
+      static_cast<size_t>((total_vecs + wg - 1) / wg) * static_cast<size_t>(wg);
+
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      sycl::nd_range<1>(sycl::range<1>(global), sycl::range<1>(wg)),
+      vllm::rotary_embedding_vec_kernel<sycl_t, IS_NEOX, VEC_SIZE>(
+          positions_ptr,
+          query_ptr,
+          key_ptr,
+          cos_sin_cache_ptr,
+          rot_dim,
+          query_stride,
+          key_stride,
+          head_stride,
+          vecs_per_head,
+          static_cast<int>(query_vecs_per_token),
+          static_cast<int>(vecs_per_token),
+          static_cast<int>(total_vecs)));
+  return true;
+}
+
+template <typename sycl_t, bool IS_NEOX, int BYTES>
+struct RopeVecCandidate {
+  static constexpr int kVec = BYTES / static_cast<int>(sizeof(sycl_t));
+  // sycl::vec tops out at 16 elements; GPT-J loads 2 * kVec at once.
+  static constexpr int kMaxVec = IS_NEOX ? 16 : 8;
+  static constexpr bool kValid = kVec >= 2 && kVec <= kMaxVec;
+};
+
+template <typename sycl_t, bool IS_NEOX, int BYTES, typename... Args>
+bool try_rope_vec_width(const RopeVecLaunch& launch, Args&&... args) {
+  using C = RopeVecCandidate<sycl_t, IS_NEOX, BYTES>;
+  if constexpr (C::kValid && BYTES <= kRopeVecBytes) {
+    if (BYTES > launch.max_bytes) return false;
+    return try_launch_rotary_embedding_vec<sycl_t, IS_NEOX, C::kVec>(
+        BYTES == launch.max_bytes ? launch.work_group : kRopeVecWorkGroupSize,
+        args...);
+  }
+  return false;
+}
+
+template <typename sycl_t, bool IS_NEOX, typename... Args>
+bool launch_rotary_embedding_vec(const RopeVecLaunch& launch, Args&&... args) {
+  // Widest allowed access first, then progressively narrower ones so that
+  // shapes or alignments that cannot sustain the wide access still get
+  // vectorized.
+  return try_rope_vec_width<sycl_t, IS_NEOX, 32>(launch, args...) ||
+         try_rope_vec_width<sycl_t, IS_NEOX, 16>(launch, args...) ||
+         try_rope_vec_width<sycl_t, IS_NEOX, 8>(launch, args...) ||
+         try_rope_vec_width<sycl_t, IS_NEOX, 4>(launch, args...);
+}
+
+}  // namespace
 
 template <typename scalar_t>
 void call_rotary_embedding_kernel(
@@ -222,45 +458,80 @@ void call_rotary_embedding_kernel(
   auto key_ptr = key.has_value() ? key->data_ptr<scalar_t>() : nullptr;
   auto cos_sin_cache_ptr = cos_sin_cache.data_ptr<scalar_t>();
 
+  at::DeviceGuard device_guard(query.device());
+  auto& queue = vllm::xpu::vllmGetQueue();
+
+  // Fast path: fully vectorized, flat index space over query + key.
+  const int64_t rot_pairs =
+      num_tokens * (rot_dim / 2) *
+      (static_cast<int64_t>(num_heads) + (key.has_value() ? num_kv_heads : 0));
+  const RopeVecLaunch launch =
+      rope_vec_launch(queue, rot_pairs, static_cast<int>(sizeof(sycl_t)));
+  const bool launched = is_neox ? launch_rotary_embedding_vec<sycl_t, true>(
+                                      launch,
+                                      queue,
+                                      positions_ptr,
+                                      (sycl_t*)query_ptr,
+                                      (sycl_t*)key_ptr,
+                                      (const sycl_t*)cos_sin_cache_ptr,
+                                      num_tokens,
+                                      rot_dim,
+                                      query_stride,
+                                      key_stride,
+                                      head_stride,
+                                      num_heads,
+                                      num_kv_heads)
+                                : launch_rotary_embedding_vec<sycl_t, false>(
+                                      launch,
+                                      queue,
+                                      positions_ptr,
+                                      (sycl_t*)query_ptr,
+                                      (sycl_t*)key_ptr,
+                                      (const sycl_t*)cos_sin_cache_ptr,
+                                      num_tokens,
+                                      rot_dim,
+                                      query_stride,
+                                      key_stride,
+                                      head_stride,
+                                      num_heads,
+                                      num_kv_heads);
+  if (launched) return;
+
   sycl::range<3> grid(1, 1, num_tokens);
   sycl::range<3> block(1, 1, std::min<int64_t>(num_heads * rot_dim / 2, 512));
 
-  at::DeviceGuard device_guard(query.device());
-  auto& queue = vllm::xpu::vllmGetQueue();
   if (is_neox) {
-    queue.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for(
-          sycl::nd_range<3>(grid * block, block),
-          vllm::rotary_embedding_kernel<sycl_t, true>(
-              positions_ptr,
-              (sycl_t*)query_ptr,
-              (sycl_t*)key_ptr,
-              (sycl_t*)cos_sin_cache_ptr,
-              rot_dim,
-              query_stride,
-              key_stride,
-              head_stride,
-              num_heads,
-              num_kv_heads,
-              head_size));
-    });
+    vllm::xpu::sycl_kernel_submit(
+        queue,
+        sycl::nd_range<3>(grid * block, block),
+        vllm::rotary_embedding_kernel<sycl_t, true>(
+            positions_ptr,
+            (sycl_t*)query_ptr,
+            (sycl_t*)key_ptr,
+            (sycl_t*)cos_sin_cache_ptr,
+            rot_dim,
+            query_stride,
+            key_stride,
+            head_stride,
+            num_heads,
+            num_kv_heads,
+            head_size));
   } else {
-    queue.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for(
-          sycl::nd_range<3>(grid * block, block),
-          vllm::rotary_embedding_kernel<sycl_t, false>(
-              positions_ptr,
-              (sycl_t*)query_ptr,
-              (sycl_t*)key_ptr,
-              (sycl_t*)cos_sin_cache_ptr,
-              rot_dim,
-              query_stride,
-              key_stride,
-              head_stride,
-              num_heads,
-              num_kv_heads,
-              head_size));
-    });
+    vllm::xpu::sycl_kernel_submit(
+        queue,
+        sycl::nd_range<3>(grid * block, block),
+        vllm::rotary_embedding_kernel<sycl_t, false>(
+            positions_ptr,
+            (sycl_t*)query_ptr,
+            (sycl_t*)key_ptr,
+            (sycl_t*)cos_sin_cache_ptr,
+            rot_dim,
+            query_stride,
+            key_stride,
+            head_stride,
+            num_heads,
+            num_kv_heads,
+            head_size));
   }
 }
 

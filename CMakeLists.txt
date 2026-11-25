@@ -61,6 +61,10 @@ set(ONEDNN_GIT_TAG
 # ARCHITECTURE OPTIONS
 option(VLLM_XPU_ENABLE_XE2 "Enable XE2 architecture kernels" ON)
 option(VLLM_XPU_ENABLE_XE3P "Enable XE3 architecture kernels" ON)
+# Xe3(p)-only companion libraries (see add_xe3_companion_library). Can be turned
+# OFF independently of VLLM_XPU_ENABLE_XE3P to work around IGC versions that
+# miscompile them. Build-time env: BUILD_QUANT_ASM_XE3=OFF.
+option(BUILD_QUANT_ASM_XE3 "Build the Xe3 companion (asm) libraries" ON)
 
 # KERNEL OPTIONS — each controls whether the corresponding Python extension is
 # built. Override from the command line with -D<NAME>=OFF or via the
@@ -79,10 +83,6 @@ option(XPU_SPECIFIC_KERNELS_ENABLED
 option(XPUMEM_ALLOCATOR_ENABLED "Build xpumem_allocator extension" ON)
 option(VLLM_XPU_ENABLE_ONEDNN
        "Build oneDNN-backed kernels (GEMM ops in _xpu_C extension)" ON)
-# Xe3(p)-only hand-written asm quant lib. Can be turned OFF independently of
-# VLLM_XPU_ENABLE_XE3P to work around IGC versions that miscompile the asm.
-# Build-time env: BUILD_QUANT_ASM_XE3=OFF (forwarded to cmake by setup.py).
-option(BUILD_QUANT_ASM_XE3 "Build the Xe3 hand-written asm quant library" ON)
 
 # KERNEL CONFIGURATION — controls which paged decode kernel variants are
 # compiled. Use model-specific configs to dramatically reduce compile time. See
@@ -586,41 +586,67 @@ endif()
 #
 
 #
-# quant_asm_xe_3 shared library — Xe3(p)-only hand-written asm quant impl.
+# Xe3(p)-only companion libraries.
 #
-if(VLLM_XPU_ENABLE_XE3P
-   AND BASIC_KERNELS_ENABLED
-   AND BUILD_QUANT_ASM_XE3)
-  message(STATUS "Enabling quant_asm_xe_3 library (Xe3 asm quant impl).")
-
-  set(QUANT_ASM_SRC "csrc/quant_asm_entry.cpp")
-
-  add_library(quant_asm_xe_3 SHARED ${QUANT_ASM_SRC})
-  set_property(TARGET quant_asm_xe_3 PROPERTY CXX_STANDARD 20)
-
-  target_compile_options(quant_asm_xe_3 PRIVATE ${VLLM_GPU_COMPILE_FLAGS} -fPIC)
-  # The asm headers key on VLLM_XPU_ENABLE_XE3; define it for this library only.
-  target_compile_definitions(quant_asm_xe_3 PRIVATE VLLM_XPU_ENABLE_XE3=1)
-  target_include_directories(quant_asm_xe_3 PRIVATE csrc
-                                                    ${VLLM_XPU_INCLUDE_DIR})
-
-  target_link_libraries(quant_asm_xe_3 PRIVATE torch ${TORCH_LIBRARIES})
-
-  # Xe3-only AOT device link flags. Unlike VLLM_GPU_LINK_FLAGS (which may also
-  # carry Xe2 devices such as bmg/pvc in a combined build), this library is a
-  # pure Xe3(p) asm impl and must only AOT-compile for Xe3 devices (cri/nvl).
-  set(QUANT_ASM_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS})
-  if(AOT_DEVICES AND XE3_AOT_DEVICES)
-    list(APPEND QUANT_ASM_LINK_FLAGS "-device ${XE3_AOT_DEVICES}")
+# An extension is AOT compiled for every device in AOT_DEVICES, so it cannot
+# carry an Xe3-only instruction -- ocloc rejects it for the Xe2 targets. Such
+# sources are compiled a second time into a companion library built for Xe3
+# alone; a dispatcher picks the copy to call at runtime.
+#
+# add_xe3_companion_library(<target> <guard_variable> <source> [<define>...])
+#
+function(add_xe3_companion_library target guard source)
+  if(NOT VLLM_XPU_ENABLE_XE3P
+     OR NOT BUILD_QUANT_ASM_XE3
+     OR NOT ${guard})
+    return()
   endif()
-  target_link_options(quant_asm_xe_3 PRIVATE ${QUANT_ASM_LINK_FLAGS})
+  message(STATUS "Enabling ${target} library (Xe3-only companion).")
+
+  add_library(${target} SHARED "${source}")
+  set_property(TARGET ${target} PROPERTY CXX_STANDARD 20)
+  target_compile_options(${target} PRIVATE ${VLLM_GPU_COMPILE_FLAGS} -fPIC)
+  # Keep the fast path on regardless of how VLLM_GPU_COMPILE_FLAGS is built.
+  target_compile_definitions(${target} PRIVATE ${ARGN})
+  target_include_directories(${target} PRIVATE csrc ${VLLM_XPU_INCLUDE_DIR})
+  target_link_libraries(${target} PRIVATE torch ${TORCH_LIBRARIES})
+
+  # Unlike VLLM_GPU_LINK_FLAGS, which may also carry Xe2 devices such as bmg/pvc
+  # in a combined build, these libraries must only AOT compile for Xe3 devices
+  # (cri/nvl).
+  set(_link_flags ${SYCL_DEVICE_LINK_FLAGS})
+  if(AOT_DEVICES AND XE3_AOT_DEVICES)
+    list(APPEND _link_flags "-device ${XE3_AOT_DEVICES}")
+  endif()
+  target_link_options(${target} PRIVATE ${_link_flags})
 
   # Ship alongside the extensions; global rpath is already $ORIGIN.
-  set_target_properties(quant_asm_xe_3 PROPERTIES LIBRARY_OUTPUT_DIRECTORY
-                                                  "${CMAKE_BINARY_DIR}/")
-  install(TARGETS quant_asm_xe_3 LIBRARY DESTINATION vllm_xpu_kernels
-                                         COMPONENT quant_asm_xe_3)
-endif()
+  set_target_properties(${target} PROPERTIES LIBRARY_OUTPUT_DIRECTORY
+                                             "${CMAKE_BINARY_DIR}/")
+  install(TARGETS ${target} LIBRARY DESTINATION vllm_xpu_kernels
+                                    COMPONENT ${target})
+endfunction()
+
+# link_xe3_companion(<extension> <target> <available_define>)
+function(link_xe3_companion extension target available_define)
+  if(NOT VLLM_XPU_ENABLE_XE3P)
+    return()
+  endif()
+  if(TARGET ${target})
+    target_link_libraries(${extension} PRIVATE ${target})
+    target_compile_definitions(${extension} PRIVATE ${available_define}=1)
+  else()
+    message(STATUS "${target} disabled; ${extension} keeps the portable "
+                   "implementation for every device.")
+  endif()
+endfunction()
+
+add_xe3_companion_library(quant_asm_xe_3 BASIC_KERNELS_ENABLED
+                          "csrc/quant_asm_entry.cpp" VLLM_XPU_ENABLE_XE3=1)
+
+add_xe3_companion_library(
+  inv_rope_asm_xe_3 XPU_SPECIFIC_KERNELS_ENABLED
+  "csrc/xpu/inv_rope_asm_entry.cpp" VLLM_XPU_SYCL_FCVT_ENABLED=1)
 
 #
 # _C extension
@@ -673,14 +699,7 @@ if(BASIC_KERNELS_ENABLED)
   target_compile_definitions(_C PRIVATE VLLM_FP8_QUANT_DISABLE_ASM=1
                                         VLLM_MXFP4_QUANT_DISABLE_ASM=1)
 
-  if(VLLM_XPU_ENABLE_XE3P AND TARGET quant_asm_xe_3)
-    target_link_libraries(_C PRIVATE quant_asm_xe_3)
-    target_compile_definitions(_C PRIVATE VLLM_QUANT_ASM_AVAILABLE=1)
-  elseif(VLLM_XPU_ENABLE_XE3P)
-    message(
-      STATUS
-        "quant_asm_xe_3 disabled; _C built without VLLM_QUANT_ASM_AVAILABLE.")
-  endif()
+  link_xe3_companion(_C quant_asm_xe_3 VLLM_QUANT_ASM_AVAILABLE)
 
 endif()
 
@@ -740,10 +759,12 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/sycl/deepseek_qnorm_rope_kv_insert.cpp"
       "csrc/xpu/sycl/deepseek_inv_rope_bf16.cpp"
       "csrc/xpu/sycl/deepseek_inv_rope_fp8_quant.cpp"
+      "csrc/xpu/inv_rope_dispatch.cpp"
       "csrc/xpu/sycl/deepseek_fused_indexer_q_rope_fp8.cpp"
       "csrc/xpu/sycl/deepseek_fused_indexer_q_rope_mxfp4.cpp"
       "csrc/xpu/sycl/fused_input_norm.cpp"
       "csrc/xpu/sycl/fused_kv_compress_norm_rope_insert_sparse_attn.cpp"
+      "csrc/xpu/sycl/fused_rope_norm_store_kv_fp8.cpp"
       "csrc/xpu/sycl/multimodal_rope.cpp"
       "csrc/xpu/sycl/apply_rotary_emb.cpp"
       "csrc/xpu/rand/exponential.cpp"
@@ -803,6 +824,8 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     USE_SABI
     3
     WITH_SOABI)
+
+  link_xe3_companion(_xpu_C inv_rope_asm_xe_3 VLLM_INV_ROPE_ASM_AVAILABLE)
 endif()
 
 #

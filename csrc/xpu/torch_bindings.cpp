@@ -101,6 +101,20 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "fused_kv_compress_norm_rope_insert_sparse_attn",
       torch::kXPU,
       &fused_kv_compress_norm_rope_insert_sparse_attn);
+  // Fused QK-Norm + RoPE + KV-Cache-Write + FP8 Q Quantization.
+  // Returns q_scale: [num_tokens, num_q_heads] (per-token-per-head).
+  xpu_ops.def(
+      "fused_rope_norm_store_kv_fp8(Tensor qkv, Tensor cos_sin_cache, "
+      "Tensor positions, Tensor! key_cache, Tensor! value_cache, "
+      "Tensor slot_mapping, "
+      "Tensor! out_q, int num_q_heads, int num_kv_heads, int head_dim, "
+      "Tensor k_scale, Tensor v_scale, Tensor? q_norm_weight, "
+      "Tensor? k_norm_weight, int qk_norm_policy, bool use_fp8) "
+      "-> Tensor");
+  xpu_ops.impl(
+      "fused_rope_norm_store_kv_fp8",
+      torch::kXPU,
+      &fused_rope_norm_store_kv_fp8);
 
   // Multi-modal Rotary Embedding (M-RoPE) — used by e.g. Qwen2-VL.
   // positions has shape [num_mrope_sections, num_tokens]; mrope_section is
@@ -147,12 +161,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("deepseek_inv_rope_bf16", torch::kXPU, &deepseek_inv_rope_bf16);
 
   // DeepSeek-V4 fused inverse RoPE + FP8 quantization: inv GPT-J rotation +
-  // per-128-block UE8M0 FP8 E4M3 quantization + group-major layout transform.
+  // block-scaled FP8 E4M3 quantization + group-major layout transform.
+  // use_mxfp8=False: per-128-block UE8M0 scales as float32.
+  // use_mxfp8=True:  per-32-block raw E8M0 scales (float8_e8m0fnu).
   xpu_ops.def(
       "deepseek_inv_rope_fp8_quant(Tensor attn_output, Tensor positions,"
       "                            Tensor cos_sin_cache, int n_groups,"
       "                            int heads_per_group, int nope_dim,"
-      "                            int rope_dim) -> (Tensor, Tensor)");
+      "                            int rope_dim, bool use_mxfp8=False)"
+      "                            -> (Tensor, Tensor)");
   xpu_ops.impl(
       "deepseek_inv_rope_fp8_quant", torch::kXPU, &deepseek_inv_rope_fp8_quant);
 
@@ -234,7 +251,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "int num_prefills, int num_decodes, int num_spec_decodes, Tensor? "
       "has_initial_state, Tensor non_spec_query_start_loc, Tensor? "
       "non_spec_token_indx, Tensor non_spec_state_indices_tensor,"
-      "int num_actual_tokens, int tp_size, bool reorder_input) -> Tensor[]");
+      "int num_actual_tokens, int tp_size, bool reorder_input, "
+      "Tensor? checkpoint_offsets=None, Tensor? checkpoint_state_indices=None) "
+      "-> Tensor[]");
   xpu_ops.impl("causal_conv1d_non_spec", torch::kXPU, &causal_conv1d_non_spec);
 
   xpu_ops.def(
@@ -269,7 +288,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "int num_prefills, int num_decodes, int num_spec_decodes, Tensor? "
       "has_initial_state, Tensor non_spec_query_start_loc, Tensor? "
       "non_spec_token_indx, Tensor non_spec_state_indices_tensor,"
-      "int num_actual_tokens, int tp_size) -> ()");
+      "int num_actual_tokens, int tp_size, "
+      "Tensor? checkpoint_offsets=None, Tensor? checkpoint_state_indices=None) "
+      "-> ()");
   xpu_ops.impl(
       "gated_delta_rule_non_spec", torch::kXPU, &gated_delta_rule_non_spec);
 
@@ -285,7 +306,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor? non_spec_state_indices_tensor, Tensor? spec_query_start_loc, "
       "Tensor? spec_token_indx, Tensor? spec_state_indices_tensor, Tensor? "
       "num_accepted_tokens, int num_actual_tokens, int "
-      "tp_size, bool reorder_input) -> ()");
+      "tp_size, bool reorder_input, "
+      "Tensor? checkpoint_offsets=None, Tensor? checkpoint_state_indices=None) "
+      "-> ()");
   xpu_ops.impl("gdn_attention", torch::kXPU, &gdn_attention);
 #endif
 

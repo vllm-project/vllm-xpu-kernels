@@ -17,6 +17,7 @@
 #include <c10/util/Float8_e4m3fn.h>
 #include <cstdint>
 #include <type_traits>
+#include "sycl_launch.h"
 
 // File-local constants, at global scope rather than inside `namespace vllm`:
 // both the kernel class and the host-side validation need them, and a
@@ -439,6 +440,26 @@ void fused_kv_compress_norm_rope_insert_sparse_attn(
     int64_t token_stride,
     int64_t scale_dim,
     int64_t kv_block_stride) {
+  CHECK_DEVICE(state_cache);
+  CHECK_DEVICE(token_to_req_indices);
+  CHECK_DEVICE(positions);
+  CHECK_DEVICE(slot_mapping);
+  CHECK_DEVICE(block_table);
+  CHECK_DEVICE(rms_norm_weight);
+  CHECK_DEVICE(cos_sin_cache);
+  CHECK_DEVICE(k_cache);
+  CHECK_DEVICE(kv_slot_mapping);
+  TORCH_CHECK(
+      state_cache.device() == token_to_req_indices.device() &&
+          state_cache.device() == positions.device() &&
+          state_cache.device() == slot_mapping.device() &&
+          state_cache.device() == block_table.device() &&
+          state_cache.device() == rms_norm_weight.device() &&
+          state_cache.device() == cos_sin_cache.device() &&
+          state_cache.device() == k_cache.device() &&
+          state_cache.device() == kv_slot_mapping.device(),
+      kOpName,
+      ": all tensors must be on the same XPU device");
   // Bind all queue lookups and device allocations to the input tensor's device,
   // regardless of the ambient current device, before vllmGetQueue() is called.
   const at::DeviceGuard device_guard(state_cache.device());
@@ -458,6 +479,15 @@ void fused_kv_compress_norm_rope_insert_sparse_attn(
   TORCH_CHECK(kv_slot_mapping.dtype() == torch::kInt64);
   TORCH_CHECK(token_to_req_indices.dtype() == torch::kInt32);
   TORCH_CHECK(block_table.dtype() == torch::kInt32);
+  TORCH_CHECK(
+      block_table.dim() == 2,
+      kOpName,
+      ": block_table must be rank-2 [num_reqs, max_blocks], got dim=",
+      block_table.dim());
+  TORCH_CHECK(
+      block_table.stride(1) == 1,
+      kOpName,
+      ": block_table must be contiguous in its block dimension");
   TORCH_CHECK(state_cache.dim() == 3);
   TORCH_CHECK(
       k_cache.dim() == 3,
@@ -525,6 +555,8 @@ void fused_kv_compress_norm_rope_insert_sparse_attn(
       kOpName,
       ": token_stride too small for fp8+rope payload");
   TORCH_CHECK(
+      kv_cache_block_size > 0, kOpName, ": kv_cache_block_size must be > 0");
+  TORCH_CHECK(
       kv_block_stride >= kv_cache_block_size * (token_stride + scale_dim),
       kOpName,
       ": kv_block_stride too small for mixed layout");
@@ -581,6 +613,7 @@ void fused_kv_compress_norm_rope_insert_sparse_attn(
       reinterpret_cast<uintptr_t>(sc) % (kVecFloats * sizeof(float)) == 0 &&
           state_cache.stride(0) % kVecFloats == 0 &&
           state_cache.stride(1) % kVecFloats == 0 &&
+          state_cache.stride(2) == 1 &&
           static_cast<int64_t>(state_width) % kVecFloats == 0,
       kOpName,
       ": state_cache must be 16-byte aligned for the vectorized gather. Need "
@@ -616,33 +649,32 @@ void fused_kv_compress_norm_rope_insert_sparse_attn(
     using WT = std::remove_const_t<std::remove_pointer_t<decltype(rw)>>;
     using K = vllm::sparse_kv_insert_fp8mix_generic_kernel<WT>;
     constexpr int WG = K::WG_SIZE;
-    q.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for(
-          sycl::nd_range<1>(num_tokens * WG, WG),
-          K{sc,
-            state_cache.stride(0),
-            state_cache.stride(1),
-            state_width,
-            tr,
-            pos,
-            sm,
-            bt,
-            block_table.stride(0),
-            state_block_size,
-            rw,
-            eps,
-            cs,
-            cos_sin_cache.stride(0),
-            kc,
-            kvs,
-            static_cast<int>(kv_cache_block_size),
-            kv_block_stride,
-            static_cast<int>(token_stride),
-            static_cast<int>(scale_dim),
-            static_cast<int>(compress_ratio),
-            static_cast<int>(overlap),
-            static_cast<int>(rope_head_dim)});
-    });
+    vllm::xpu::sycl_kernel_submit(
+        q,
+        sycl::nd_range<1>(num_tokens * WG, WG),
+        K{sc,
+          state_cache.stride(0),
+          state_cache.stride(1),
+          state_width,
+          tr,
+          pos,
+          sm,
+          bt,
+          block_table.stride(0),
+          state_block_size,
+          rw,
+          eps,
+          cs,
+          cos_sin_cache.stride(0),
+          kc,
+          kvs,
+          static_cast<int>(kv_cache_block_size),
+          kv_block_stride,
+          static_cast<int>(token_stride),
+          static_cast<int>(scale_dim),
+          static_cast<int>(compress_ratio),
+          static_cast<int>(overlap),
+          static_cast<int>(rope_head_dim)});
   };
 
   if (rms_norm_weight.scalar_type() == torch::kBFloat16) {

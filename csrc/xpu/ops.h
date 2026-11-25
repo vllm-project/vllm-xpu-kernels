@@ -131,6 +131,23 @@ void fused_kv_compress_norm_rope_insert_sparse_attn(
     int64_t token_stride,
     int64_t scale_dim,
     int64_t kv_block_stride);
+torch::Tensor fused_rope_norm_store_kv_fp8(
+    const torch::Tensor& qkv,
+    const torch::Tensor& cos_sin_cache,
+    const torch::Tensor& positions,
+    torch::Tensor& key_cache,
+    torch::Tensor& value_cache,
+    const torch::Tensor& slot_mapping,
+    torch::Tensor& out_q,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    const torch::Tensor& k_scale,
+    const torch::Tensor& v_scale,
+    std::optional<torch::Tensor> q_norm_weight,
+    std::optional<torch::Tensor> k_norm_weight,
+    int64_t qk_norm_policy,
+    bool use_fp8);
 
 void multimodal_rotary_embedding(
     torch::Tensor& positions,  // [num_mrope_sections, num_tokens]
@@ -176,7 +193,8 @@ std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
     int64_t n_groups,
     int64_t heads_per_group,
     int64_t nope_dim,
-    int64_t rope_dim);
+    int64_t rope_dim,
+    bool use_mxfp8);
 
 #ifdef VLLM_MHC_ENABLED
 std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
@@ -265,7 +283,9 @@ std::vector<torch::Tensor> causal_conv1d_non_spec(
     const torch::Tensor& non_spec_state_indices_tensor,
     const int64_t num_actual_tokens,
     const int64_t tp_size,
-    const bool reorder_input);
+    const bool reorder_input,
+    const std::optional<torch::Tensor>& checkpoint_offsets,
+    const std::optional<torch::Tensor>& checkpoint_state_indices);
 
 void gated_delta_rule_spec(
     torch::Tensor& core_attn_out,
@@ -330,7 +350,9 @@ void gated_delta_rule_non_spec(
     const std::optional<torch::Tensor>& non_spec_token_indx,
     const torch::Tensor& non_spec_state_indices_tensor,
     const int64_t num_actual_tokens,
-    const int64_t tp_size);
+    const int64_t tp_size,
+    const std::optional<torch::Tensor>& checkpoint_offsets,
+    const std::optional<torch::Tensor>& checkpoint_state_indices);
 
 // Legacy fused entry point kept for API backward compatibility. Internally
 // chains causal_conv1d and gated_delta_rule to reproduce the original
@@ -364,7 +386,9 @@ void gdn_attention(
     const std::optional<torch::Tensor>& num_accepted_tokens,
     const int64_t num_actual_tokens,
     const int64_t tp_size,
-    const bool reorder_input);
+    const bool reorder_input,
+    const std::optional<torch::Tensor>& checkpoint_offsets,
+    const std::optional<torch::Tensor>& checkpoint_state_indices);
 #endif
 
 bool is_bmg_g21(int64_t device_index);

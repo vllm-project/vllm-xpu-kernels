@@ -909,7 +909,9 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
     const int num_k_heads,
     const int head_k_dim,
     const int num_v_heads,
-    const int head_v_dim) {
+    const int head_v_dim,
+    const int* checkpoint_offsets,
+    const int* checkpoint_state_indices) {
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   int local_id = item.get_local_linear_id();
   int current_batch_id = item.get_group(0);
@@ -974,6 +976,29 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
         static_cast<int64_t>(cache_indices[batch_id]) * ssm_state_stride_0 +
         v_head_id * head_v_dim * head_k_dim;
 
+    // Internal prefill checkpoint: the state after the first
+    // `checkpoint_chunk * chunk_size` tokens is copied to its own cache slot.
+    int checkpoint_chunk = -1;
+    StateT* checkpoint_state_ptr = nullptr;
+    if (checkpoint_offsets != nullptr) {
+      const int ckpt_offset = checkpoint_offsets[batch_id];
+      const int ckpt_state_id = checkpoint_state_indices[batch_id];
+      if (ckpt_offset > 0 && ckpt_offset % chunk_size == 0 &&
+          ckpt_offset <= seq_len && ckpt_state_id > 0) {
+        checkpoint_chunk = ckpt_offset / chunk_size;
+        checkpoint_state_ptr =
+            ssm_state +
+            static_cast<int64_t>(ckpt_state_id) * ssm_state_stride_0 +
+            v_head_id * head_v_dim * head_k_dim;
+      }
+    }
+    auto copy_checkpoint_state = [&]() {
+      const int state_elems = head_v_dim * head_k_dim;
+      for (int e = local_id; e < state_elems; e += local_range) {
+        checkpoint_state_ptr[e] = ssm_state_ptr[e];
+      }
+    };
+
     for (int chunk_id = 0; chunk_id < current_chunks; ++chunk_id) {
       const bool has_prev_state = (chunk_id != 0) || initial_state;
       const int out_chunk_offset = seq_start_offset + chunk_id * chunk_size;
@@ -993,6 +1018,11 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       // their output/state GEMM epilogues; all must arrive before any
       // sub-group refills these SLM buffers for this chunk.
       sycl::group_barrier(item.get_group());
+      // The previous chunk's state is complete here, and it is only
+      // overwritten after the barrier below.
+      if (chunk_id == checkpoint_chunk) {
+        copy_checkpoint_state();
+      }
       CUTE_UNROLL
       for (int e = local_id; e < current_chunk_size; e += local_range) {
         float g_cumsum_value =
@@ -1254,6 +1284,10 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
         }
       }
     }
+    if (checkpoint_chunk == current_chunks) {
+      sycl::group_barrier(item.get_group());
+      copy_checkpoint_state();
+    }
     pre_chunks += current_chunks;
   }
 }
@@ -1303,7 +1337,9 @@ void kernel_launcher(
     const int num_k_heads,
     const int head_k_dim,
     const int num_v_heads,
-    const int head_v_dim) {
+    const int head_v_dim,
+    const int* checkpoint_offsets,
+    const int* checkpoint_state_indices) {
   using Element_non_CV = cutlass::platform::remove_cv_t<T>;
   auto op = XE_DPAS_TT<8, float, Element_non_CV>{};
 
@@ -1542,7 +1578,9 @@ void kernel_launcher(
               num_k_heads,
               head_k_dim,
               num_v_heads,
-              head_v_dim);
+              head_v_dim,
+              checkpoint_offsets,
+              checkpoint_state_indices);
         });
   });
 }
@@ -1565,7 +1603,9 @@ void chunk_gated_delta_rule_impl_xe2(
         has_initial_state,  // [batch_size] or None
     const int num_prefills,
     const int num_decodes,
-    const int* token_indx) {
+    const int* token_indx,
+    const int* checkpoint_offsets = nullptr,
+    const int* checkpoint_state_indices = nullptr) {
   if (num_prefills == 0 && num_decodes == 0) {
     return;
   }
@@ -1657,7 +1697,9 @@ void chunk_gated_delta_rule_impl_xe2(
       num_k_heads,                                                 \
       head_k_dim,                                                  \
       num_v_heads,                                                 \
-      head_v_dim);
+      head_v_dim,                                                  \
+      checkpoint_offsets,                                          \
+      checkpoint_state_indices);
 
 #define DISPATCH_STATE_DTYPE(scalar_t, out_scalar_t)                    \
   do {                                                                  \
