@@ -12,6 +12,7 @@ from shutil import which
 
 from packaging.version import Version
 from setuptools import Extension, setup
+from setuptools.command.build import build
 from setuptools.command.build_ext import build_ext
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import SYCL_HOME
@@ -71,6 +72,23 @@ def _is_enabled(env_name: str, default: str = "ON") -> bool:
     """Check if a build option env var is enabled (default ON)."""
     val = os.environ.get(env_name, default).strip().upper()
     return val not in ("0", "OFF", "FALSE", "NO")
+
+
+def _build_minicpm5_mono() -> bool:
+    return (_is_enabled("MINICPM5_MONO_KERNELS_ENABLED")
+            and _is_enabled("VLLM_XPU_ENABLE_XE2"))
+
+
+class kernel_build(build):
+
+    def finalize_options(self) -> None:
+        default_build_lib = self.build_lib is None
+        super().finalize_options()
+        if (default_build_lib and not envs.VLLM_USE_PRECOMPILED
+                and not _build_minicpm5_mono()):
+            # Wheel staging copies the whole build_lib tree. Keep the opt-out
+            # staging separate while allowing CMake to reuse build/temp.
+            self.build_lib += "-without-minicpm5"
 
 
 class CMakeExtension(Extension):
@@ -590,8 +608,7 @@ if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
                 "/csrc/xpu/grouped_gemm/xe_3")
 
 if _build_custom_ops():
-    if (_is_enabled("MINICPM5_MONO_KERNELS_ENABLED")
-            and _is_enabled("VLLM_XPU_ENABLE_XE2")):
+    if _build_minicpm5_mono():
         ext_modules.append(CMakeExtension(
             name="vllm_xpu_kernels._minicpm5_mono_C", py_limited_api=False))
     if _is_enabled("BASIC_KERNELS_ENABLED"):
@@ -606,12 +623,10 @@ if _build_custom_ops():
         ext_modules.append(
             CMakeExtension(name="vllm_xpu_kernels.xpumem_allocator"))
 
-cmdclass = {}
+cmdclass = {"build": kernel_build}
 if ext_modules:
-    cmdclass = {
-        "build_ext":
-        precompiled_build_ext if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
-    }
+    cmdclass["build_ext"] = (
+        precompiled_build_ext if envs.VLLM_USE_PRECOMPILED else cmake_build_ext)
 
 setup(
     version=get_vllm_version(),

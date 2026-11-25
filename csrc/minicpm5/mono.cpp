@@ -148,6 +148,7 @@ class Region : public torch::CustomClassHolder {
     check_stream();
     TORCH_CHECK(
         !stream_.is_capturing() && !peer_ && fd >= 0 &&
+            fd <= std::numeric_limits<int32_t>::max() &&
             info.size() == 6 + ZE_MAX_IPC_HANDLE_SIZE / 4 && info[0] == 1 &&
             info[3] == bytes_ && info[1] != getpid(),
         "invalid MiniCPM peer IPC info");
@@ -169,12 +170,10 @@ class Region : public torch::CustomClassHolder {
     const uint64_t expected =
         uint32_t(info[4]) | (uint64_t(uint32_t(info[5])) << 32);
     auto& queue = stream_.queue();
-    uint64_t* readback = sycl::malloc_shared<uint64_t>(1, queue);
-    if (!readback) {
-      zeMemCloseIpcHandle(context_, pointer);
-      TORCH_CHECK(false, "peer IPC cookie readback allocation failed");
-    }
+    uint64_t* readback = nullptr;
     try {
+      readback = sycl::malloc_shared<uint64_t>(1, queue);
+      TORCH_CHECK(readback, "peer IPC cookie readback allocation failed");
       // Validate the actual device load used by the mailbox protocol. A SYCL
       // memcpy can select a copy engine that cannot access the imported peer.
       queue
@@ -315,7 +314,16 @@ nk(const Tensor& tensor, int64_t n, int64_t k, const char* name, int device) {
       tensor.sizes(),
       " strides ",
       tensor.strides());
-  return static_cast<const uint8_t*>(tensor.data_ptr());
+  const auto* pointer = static_cast<const uint8_t*>(tensor.data_ptr());
+  constexpr size_t Alignment = alignof(sycl::uint4);
+  TORCH_CHECK(
+      reinterpret_cast<uintptr_t>(pointer) % Alignment == 0,
+      "MiniCPM mono ",
+      name,
+      " requires a ",
+      Alignment,
+      "-byte aligned base");
+  return pointer;
 }
 
 const float* scale(const Tensor& tensor, int64_t elements, int device) {
@@ -328,6 +336,8 @@ const float* scale(const Tensor& tensor, int64_t elements, int device) {
       " contiguous FP32 scale elements");
   return tensor.data_ptr<float>();
 }
+
+constexpr size_t Block2dAlignment = 64;
 
 Weights check_weights(
     const std::vector<Tensor>& t,
@@ -368,7 +378,6 @@ Weights check_weights(
 #ifdef MINICPM5_MONO_REFERENCE_MOE_ENABLED
     // Subgroup block-2D loads use each expert matrix as a cache-line-aligned
     // surface. Both expert strides are multiples of the same alignment.
-    constexpr size_t Block2dAlignment = 64;
     TORCH_CHECK(
         reinterpret_cast<uintptr_t>(w.w13) % Block2dAlignment == 0 &&
             reinterpret_cast<uintptr_t>(w.w2) % Block2dAlignment == 0,
@@ -427,6 +436,16 @@ Workspace check_workspace(
       t[7].data_ptr<int>()};
 }
 
+#ifdef MINICPM5_MONO_REFERENCE_ATTENTION_ENABLED
+void check_cache_alignment(const Tensor& cache) {
+  // The admitted packed layouts keep each token/head row aligned to the
+  // cache-line-aligned base required by the attention block-2D loads.
+  TORCH_CHECK(
+      reinterpret_cast<uintptr_t>(cache.data_ptr()) % Block2dAlignment == 0,
+      "MiniCPM mono KV cache requires a 64-byte aligned base");
+}
+#endif
+
 void validate(
     const std::vector<Tensor>& weights,
     const Tensor& cache,
@@ -459,6 +478,9 @@ void validate(
       cache.sizes(),
       " strides ",
       cache.strides());
+#ifdef MINICPM5_MONO_REFERENCE_ATTENTION_ENABLED
+  check_cache_alignment(cache);
+#endif
 }
 
 void check_disjoint(
@@ -797,7 +819,7 @@ void draft_decode(
   const int QDim = 32 / tp * D, QKV = (32 + 4) / tp * D;
   const int Intermediate = 8192 / tp;
   constexpr int R = DraftRows;
-  const int device = hidden.get_device();
+  const int device = c10::xpu::current_device();
   constexpr auto dtype = at::kHalf;
   check_tensor(hidden, dtype, {R, H}, "draft hidden", device);
   if (residual)
@@ -826,6 +848,7 @@ void draft_decode(
           (cache.is_contiguous() ||
            cache.permute({0, 2, 1, 3}).is_contiguous()),
       "MiniCPM mono draft requires a contiguous TP1/TP2 FP16 K/V cache");
+  check_cache_alignment(cache);
   TORCH_CHECK(
       rope.is_xpu() && rope.get_device() == device &&
           rope.scalar_type() == dtype && rope.dim() == 2 && rope.size(0) > 0 &&
@@ -941,6 +964,10 @@ void candidate_topk_impl(
       "MiniCPM candidates require BF16/FP16 logits");
   check_tensor(
       logits, logits.scalar_type(), logits.sizes(), "candidate logits", device);
+  constexpr size_t Alignment = alignof(sycl::vec<uint16_t, 8>);
+  TORCH_CHECK(
+      reinterpret_cast<uintptr_t>(logits.data_ptr()) % Alignment == 0,
+      "MiniCPM candidate logits require a 16-byte aligned base");
   check_tensor(
       values, at::kFloat, {logits.size(0), 128}, "candidate values", device);
   check_tensor(indices, at::kInt, values.sizes(), "candidate indices", device);
@@ -957,6 +984,9 @@ void candidate_topk_impl(
         "MiniCPM draft candidate bias requires direct FP16 greedy sampling");
     check_tensor(
         *bias, at::kHalf, logits.sizes(), "draft candidate bias", device);
+    TORCH_CHECK(
+        reinterpret_cast<uintptr_t>(bias->data_ptr()) % Alignment == 0,
+        "MiniCPM draft candidate bias requires a 16-byte aligned base");
   }
   if (sampled) {
     TORCH_CHECK(

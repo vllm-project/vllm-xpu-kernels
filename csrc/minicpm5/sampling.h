@@ -15,14 +15,16 @@ constexpr int KMAX = 64;
 constexpr int BMAX = 8;
 constexpr int CAP = 4096;  // collected logits per row (SLM)
 
-template <bool MatchTorchNaN = false>
+template <bool MaskNaN = false>
 inline uint64_t make_key(float v, int t) {
   // Argmax treats signed zeros as equal and then chooses the smallest ID.
   uint32_t b = sycl::bit_cast<uint32_t>(v);
   const uint32_t magnitude = b & 0x7fffffffu;
   if (magnitude == 0) b = 0;
-  if constexpr (MatchTorchNaN)
-    if (magnitude > 0x7f800000u) b = 0x7fc00000u;
+  if constexpr (MaskNaN) {
+    // Match the stock DSpark greedy sampler's NaN-to-negative-infinity rule.
+    if (magnitude > 0x7f800000u) b = 0xff800000u;
+  }
   const uint32_t u = (b & 0x80000000u) ? ~b : (b | 0x80000000u);
   return ((uint64_t)u << 32) | (uint32_t)(0xFFFFFFFFu - (uint32_t)t);
 }

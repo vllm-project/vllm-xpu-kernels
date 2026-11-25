@@ -979,15 +979,42 @@ def _candidate_worker(rank, connections, parent_pid, expected_library, dtype):
                         bias = torch.zeros_like(full)
                         bias[:, 0] = -32768
                         bias[:, 65281] = 32768
-                        for use_nan in (False, True):
-                            if use_nan:
+                        for pattern in ("finite", "some_nan", "all_nan"):
+                            if pattern == "some_nan":
                                 bias[:, 15] = -float("nan")
                                 bias[:, 65282] = float("nan")
+                            elif pattern == "all_nan":
+                                bias.fill_(float("nan"))
                             local_bias = (
                                 bias[:, rank * 65280 : (rank + 1) * 65280]
                                 .contiguous()
                                 .to(device)
                             )
+                            if pattern == "finite":
+                                misaligned = shard.new_empty(
+                                    (shard.numel() + 1,)
+                                )[1:].view_as(shard)
+                                for logits, candidate_bias, match in (
+                                    (misaligned, local_bias, "logits"),
+                                    (shard, misaligned, "bias"),
+                                ):
+                                    with pytest.raises(
+                                        RuntimeError, match=match + ".*16-byte"
+                                    ):
+                                        ops.candidate_greedy_bias(
+                                            values,
+                                            indices,
+                                            logits,
+                                            rank,
+                                            partial,
+                                            control,
+                                            owner,
+                                            sampled,
+                                            counts,
+                                            rejected,
+                                            candidate_bias,
+                                        )
+                                assert int(control[0]) == tag_before
                             ops.candidate_greedy_bias(
                                 values,
                                 indices,
@@ -1001,10 +1028,11 @@ def _candidate_worker(rank, connections, parent_pid, expected_library, dtype):
                                 rejected,
                                 local_bias,
                             )
-                            assert torch.equal(
-                                sampled.cpu()[:, 0],
-                                (full + bias).float().argmax(-1),
-                            )
+                            scores = (full + bias).float()
+                            expected = scores.masked_fill(
+                                scores.isnan(), float("-inf")
+                            ).argmax(-1)
+                            assert torch.equal(sampled.cpu()[:, 0], expected)
                             assert int(control[ops.health_offset()]) == 0
                 cases += 1
     connection.send(("mailbox-fault",))
@@ -1678,6 +1706,29 @@ def test_output_alias_is_rejected_before_submission(native):
             True,
         )
     assert torch.equal(cache, before)
+
+
+@pytest.mark.parametrize("tensor_name", ["projection", "cache"])
+def test_validate_rejects_misaligned_storage(native, tensor_name):
+    device = "xpu:0"
+    weights = make_weights(True, device)
+    shape = (1, 2, 64, 2 * D)
+    offset = int(tensor_name == "cache")
+    cache = torch.empty(
+        2 * 64 * 2 * D + offset, dtype=DTYPE, device=device
+    )[offset:].view(shape)
+    if tensor_name == "projection":
+        k, n = weights[2].shape
+        weights[2] = (
+            torch.empty(k * n + 1, dtype=torch.float8_e4m3fn, device=device)[1:]
+            .view(n, k)
+            .t()
+        )
+        match = "QKV.*16-byte"
+    else:
+        match = "KV cache.*64-byte"
+    with pytest.raises(RuntimeError, match=match):
+        native.validate(weights, cache, workspace(1, device, DTYPE), 1, True)
 
 
 @pytest.mark.parametrize("dense", [True, False])
