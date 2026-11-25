@@ -285,6 +285,7 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias, activation,
                 activation_situ_linear_beta=(
                     25.0 if activation == "situ" else None),
             )
+    fused_moe_impl.prepack_weights()
 
     def run(hidden_states, topk_weights, topk_ids, impl=fused_moe_impl):
         output = torch.empty_like(ref_out)
@@ -357,6 +358,7 @@ def test_fused_moe_hooks(m, n, k, e, topk, dtype):
         activation="silu",
         num_experts=e,
     )
+    fused_moe_impl.prepack_weights()
 
     flat_experts = expert_indices.view(-1).long()
     calls = []
@@ -485,6 +487,7 @@ def test_fused_moe_int4(m, n, k, e, topk, dtype, has_bias):
                 activation="silu",
                 num_experts=e,
             )
+    fused_moe_impl.prepack_weights()
 
     output = torch.empty_like(ref_out)
     fused_moe_impl.apply(
@@ -609,6 +612,7 @@ def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias, activation):
                 activation_situ_linear_beta=(
                     25.0 if activation == "situ" else None),
             )
+    fused_moe_impl.prepack_weights()
 
     output = torch.empty_like(ref_out)
     fused_moe_impl.apply(
@@ -744,6 +748,7 @@ def test_fused_moe_mxfp8(m, n, k, e, topk, dtype, has_bias):
         activation="silu",
         num_experts=e,
     )
+    fused_moe_impl.prepack_weights()
     assert fused_moe_impl.is_mxfp8
     assert fused_moe_impl._use_ref is False
 
@@ -865,6 +870,7 @@ def test_fused_moe_fp8block(m, n, k, e, topk, dtype, has_bias):
         activation="silu",
         num_experts=e,
     )
+    fused_moe_impl.prepack_weights()
     assert fused_moe_impl.is_block_fp8
     assert fused_moe_impl.gemm1_wei_scales is not None
     assert fused_moe_impl.w13.dtype == torch.float8_e4m3fn
@@ -1012,6 +1018,7 @@ def test_fused_moe_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, w_dtype,
                 ep_rank=ep_rank,
                 ep_size=ep_size,
             )
+    fused_moe_impl.prepack_weights()
 
     output = torch.empty_like(ref_out)
     fused_moe_impl.apply(
@@ -1140,6 +1147,7 @@ def test_fused_moe_int4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
                 ep_rank=ep_rank,
                 ep_size=ep_size,
             )
+    fused_moe_impl.prepack_weights()
 
     output = torch.empty_like(ref_out)
     fused_moe_impl.apply(
@@ -1264,6 +1272,7 @@ def test_fused_moe_mxfp4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
                 ep_rank=ep_rank,
                 ep_size=ep_size,
             )
+    fused_moe_impl.prepack_weights()
 
     output = torch.empty_like(ref_out)
     fused_moe_impl.apply(
@@ -1337,6 +1346,7 @@ def test_fused_moe_clamp_limit(m, n, k, e, topk, dtype, gemm1_clamp_limit):
                 num_experts=e,
                 gemm1_clamp_limit=gemm1_clamp_limit,
             )
+    fused_moe_impl.prepack_weights()
 
     output = torch.empty_like(ref_out)
     fused_moe_impl.apply(

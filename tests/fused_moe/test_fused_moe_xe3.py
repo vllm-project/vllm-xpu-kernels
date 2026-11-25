@@ -406,6 +406,7 @@ def test_fused_moe(m, n, k, e, topk, recipe, has_bias, monkeypatch):
         is_block_fp8=(recipe == "fp8block"),
         is_fp8=(recipe == "fp8"),
     )
+    fused_moe_impl.prepack_weights()
 
     output = torch.empty((input_len, hidden_size),
                          dtype=hidden_states.dtype,
@@ -478,13 +479,20 @@ def test_fused_moe_swiglu_limit_in_act_quant(m, n, k, recipe,
     hidden_states, a1q_scale = quant_act_xpu(
         _to_kernel(x).to(torch.bfloat16), recipe)
 
+    k_w13 = _to_kernel(w13)
+    k_w13_scales = _to_kernel(w13_scales)
+    k_w13_bias = _to_kernel(w13_bias)
+    k_w2 = _to_kernel(w2)
+    k_w2_scales = _to_kernel(w2_scales)
+    k_w2_bias = _to_kernel(w2_bias)
+
     def _run(limit):
-        moe = XpuFusedMoe(w13=_to_kernel(w13),
-                          w13_scales=_to_kernel(w13_scales),
-                          w13_bias=_to_kernel(w13_bias),
-                          w2=_to_kernel(w2),
-                          w2_scales=_to_kernel(w2_scales),
-                          w2_bias=_to_kernel(w2_bias),
+        moe = XpuFusedMoe(w13=k_w13.clone(),
+                          w13_scales=k_w13_scales.clone(),
+                          w13_bias=k_w13_bias,
+                          w2=k_w2.clone(),
+                          w2_scales=k_w2_scales.clone(),
+                          w2_bias=k_w2_bias,
                           n_experts_per_token=topk,
                           activation="silu",
                           num_experts=e,
@@ -492,6 +500,7 @@ def test_fused_moe_swiglu_limit_in_act_quant(m, n, k, recipe,
                           is_mxfp8=(recipe == "mxfp8"),
                           is_mxfp4=(recipe in ("mxfp4", "mxfp4_fp8")),
                           is_block_fp8=(recipe == "fp8block"))
+        moe.prepack_weights()
         assert moe.recipe == recipe
         out = torch.empty((m, k), dtype=torch.float32, device=KERNEL_DEVICE)
         moe.apply(output=out,
