@@ -269,9 +269,62 @@ jobs:
           # fixme: Running lora UT separately to avoid OOM when running together with other tests.
           XPU_KERNEL_TEST_SCOPE=${{ env.XPU_KERNEL_TEST_SCOPE }} ZE_AFFINITY_MASK=0,1 pytest -v -s tests/test_lora_ops.py
 
+  run-minicpm5-unit-tests-bmg:
+    runs-on: self-hosted-bmg
+    needs: build-docker-image-latest-bmg
+    timeout-minutes: 50
+    container:
+      image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-latest-bmg.outputs.image_tag }}
+      options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          set-safe-directory: true
+
+      - name: Install build and test dependencies
+        run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          uv pip install -r requirements.txt
+
+      - name: Build and test the MiniCPM5 wheel with the default feature setting
+        env:
+          VLLM_XPU_ENABLE_XE2: 'ON'
+          VLLM_XPU_ENABLE_XE3P: 'OFF'
+          BUILD_SYCL_TLA_KERNELS: 'OFF'
+          BASIC_KERNELS_ENABLED: 'OFF'
+          FA2_KERNELS_ENABLED: 'OFF'
+          MOE_KERNELS_ENABLED: 'OFF'
+          GDN_KERNELS_ENABLED: 'OFF'
+          MQA_LOGITS_KERNELS_ENABLED: 'OFF'
+          MHC_KERNELS_ENABLED: 'OFF'
+          XPU_SPECIFIC_KERNELS_ENABLED: 'OFF'
+          XPUMEM_ALLOCATOR_ENABLED: 'OFF'
+          VLLM_XPU_ENABLE_ONEDNN: 'OFF'
+          XPU_KERNEL_TEST_SCOPE: ci
+          ZE_AFFINITY_MASK: '0,1'
+        run: |
+          test_root=$(mktemp -d)
+          trap 'rm -rf -- "$test_root"' EXIT
+          unset MINICPM5_MONO_KERNELS_ENABLED
+          MAX_JOBS=4 uv build --no-build-isolation --wheel --out-dir "$test_root/wheel" -v
+          uv pip install --no-deps --target "$test_root/site" "$test_root"/wheel/*.whl
+          cd "$test_root"
+          export PYTHONPATH="$test_root/site:$GITHUB_WORKSPACE"
+          python - "$test_root/site" <<'PY'
+          import sys
+          from pathlib import Path
+          from vllm_xpu_kernels import minicpm5_mono
+
+          library = minicpm5_mono.library_info()
+          assert Path(library["path"]).is_relative_to(Path(sys.argv[1]).resolve()), library
+          assert minicpm5_mono.load().supports_device(0), "MiniCPM5 requires a supported BMG device"
+          PY
+          python -m pytest -v -s --import-mode=append "$GITHUB_WORKSPACE/tests/minicpm5"
+
   clean-repo-bmg:
     runs-on: self-hosted-bmg
-    needs: run-unit-tests-bmg
+    needs: [run-unit-tests-bmg, run-minicpm5-unit-tests-bmg]
     steps:
       - name: Clean workspace
         run: |
