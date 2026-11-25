@@ -80,7 +80,7 @@ constexpr int NWR =
     4;  // work-groups per row (more: thinner slices, weaker thresholds, slower)
 
 struct Args {
-  const uint16_t* lg;  // [B][ld] logits of this rank's shard (fp16 or bf16)
+  const uint16_t* lg;    // [B][ld] logits of this rank's shard (fp16 or bf16)
   const uint16_t* bias;  // optional contiguous FP16 bias for DSpark greedy
   int vs, ld, k, rank,
       lo;          // lo: output row stride (>= 2k; [2k, lo) = -inf / 0)
@@ -161,8 +161,9 @@ void shard_topk(sycl::queue& q, const Args& a, int rows) {
                   a.bias + (size_t)row * a.vs + v * 8);
 #pragma unroll
               for (int e = 0; e < 8; ++e) {
-                const DT sum = DT(float(sycl::bit_cast<DT>(x[e])) +
-                                  float(sycl::bit_cast<DT>(b[e])));
+                const DT sum =
+                    DT(float(sycl::bit_cast<DT>(x[e])) +
+                       float(sycl::bit_cast<DT>(b[e])));
                 kk[e] = make_key<true>(float(sum), v * 8 + e);
               }
             } else {
