@@ -131,6 +131,23 @@ void fused_kv_compress_norm_rope_insert_sparse_attn(
     int64_t token_stride,
     int64_t scale_dim,
     int64_t kv_block_stride);
+torch::Tensor fused_rope_norm_store_kv_fp8(
+    const torch::Tensor& qkv,
+    const torch::Tensor& cos_sin_cache,
+    const torch::Tensor& positions,
+    torch::Tensor& key_cache,
+    torch::Tensor& value_cache,
+    const torch::Tensor& slot_mapping,
+    torch::Tensor& out_q,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    const torch::Tensor& k_scale,
+    const torch::Tensor& v_scale,
+    std::optional<torch::Tensor> q_norm_weight,
+    std::optional<torch::Tensor> k_norm_weight,
+    int64_t qk_norm_policy,
+    bool use_fp8);
 
 void multimodal_rotary_embedding(
     torch::Tensor& positions,  // [num_mrope_sections, num_tokens]
@@ -176,7 +193,8 @@ std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
     int64_t n_groups,
     int64_t heads_per_group,
     int64_t nope_dim,
-    int64_t rope_dim);
+    int64_t rope_dim,
+    bool use_mxfp8);
 
 #ifdef VLLM_MHC_ENABLED
 std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
@@ -461,3 +479,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compact_sampling_mask(
     int64_t max_num_kept,
     int64_t max_compact_support,
     int64_t rows_per_request);
+
+int64_t vmm_granularity(int64_t device_index);
+int64_t vmm_reserve(int64_t size);
+void vmm_free_reserved(int64_t ptr, int64_t size);
+int64_t vmm_create(int64_t size, int64_t device_index);
+void vmm_map(int64_t ptr, int64_t size, int64_t handle);
+void vmm_set_access(int64_t ptr, int64_t size, int64_t device_index);
+void vmm_unmap(int64_t ptr, int64_t size);
+void vmm_release(int64_t handle);
+torch::Tensor
+vmm_tensor_from_ptr(int64_t ptr, int64_t num_bytes, int64_t device_index);

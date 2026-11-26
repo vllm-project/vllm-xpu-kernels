@@ -135,8 +135,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_XPU_ENABLE_XE2", "ON"),
     "VLLM_XPU_ENABLE_XE3P":
     lambda: os.getenv("VLLM_XPU_ENABLE_XE3P", "ON"),
-    # Build libquant_asm_xe_3, the Xe3p inline-asm quant library that is
-    # selected at runtime on Xe3p devices only
+    # Build the Xe3(p)-only companion libraries (inline-asm fast paths that are
+    # selected at runtime on Xe3p devices only)
     "BUILD_QUANT_ASM_XE3":
     lambda: os.getenv("BUILD_QUANT_ASM_XE3", "ON"),
 

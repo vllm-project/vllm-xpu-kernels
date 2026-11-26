@@ -1,5 +1,7 @@
 #pragma once
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cctype>
 #include <memory>
 #include <ATen/ATen.h>
@@ -116,6 +118,23 @@ static inline bool is_xe3p_arch(at::DeviceIndex device_index = -1) {
       arch == syclex::architecture::intel_gpu_cri ||
 #endif
       arch == syclex::architecture::intel_gpu_nvl_p;
+}
+
+// is_xe3p_arch cached per device, for host dispatch on every op call: the
+// device architecture never changes.
+static inline bool is_xe3p_arch_cached(at::DeviceIndex device_index = -1) {
+  if (device_index == -1) device_index = c10::xpu::current_device();
+  constexpr int kMaxDevices = 64;
+  // 0 = unknown, 1 = not Xe3p, 2 = Xe3p.
+  static std::array<std::atomic<int8_t>, kMaxDevices> cache{};
+  if (device_index < 0 || device_index >= kMaxDevices)
+    return is_xe3p_arch(device_index);
+  int8_t state = cache[device_index].load(std::memory_order_relaxed);
+  if (state == 0) {
+    state = is_xe3p_arch(device_index) ? 2 : 1;
+    cache[device_index].store(state, std::memory_order_relaxed);
+  }
+  return state == 2;
 }
 
 static inline std::optional<std::string> getEnv(const char* name) {

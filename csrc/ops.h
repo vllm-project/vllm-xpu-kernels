@@ -223,6 +223,14 @@ void cp_gather_and_upconvert_fp8_kv_cache(
     std::optional<torch::Tensor> host_cache = std::nullopt,
     std::optional<torch::Tensor> host_row_ids = std::nullopt,
     std::optional<torch::Tensor> device_row_ids = std::nullopt);
+void dequantize_and_gather_k_cache(
+    torch::Tensor& out,             // [batch, max_tokens, 512]
+    torch::Tensor const& k_cache,   // [num_blocks, block_bytes] uint8
+    torch::Tensor const& seq_lens,  // [batch]
+    const std::optional<torch::Tensor>& gather_lens,  // [batch] or None
+    torch::Tensor const& block_table,  // [batch, max_blocks_per_seq]
+    int64_t block_size,
+    int64_t offset);
 
 void indexer_k_quant_and_cache(
     torch::Tensor& k,             // [num_tokens, head_dim]
@@ -305,6 +313,13 @@ void relu2_no_mul(torch::Tensor& out, torch::Tensor& input);
 
 void swiglustep_and_mul(
     torch::Tensor& out, torch::Tensor& input, double limit = 7.0);
+
+void silu_and_mul_with_clamp(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    double limit,
+    double alpha = 1.0,
+    double beta = 0.0);
 
 torch::Tensor get_xpu_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 

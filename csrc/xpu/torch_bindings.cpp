@@ -101,6 +101,20 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "fused_kv_compress_norm_rope_insert_sparse_attn",
       torch::kXPU,
       &fused_kv_compress_norm_rope_insert_sparse_attn);
+  // Fused QK-Norm + RoPE + KV-Cache-Write + FP8 Q Quantization.
+  // Returns q_scale: [num_tokens, num_q_heads] (per-token-per-head).
+  xpu_ops.def(
+      "fused_rope_norm_store_kv_fp8(Tensor qkv, Tensor cos_sin_cache, "
+      "Tensor positions, Tensor! key_cache, Tensor! value_cache, "
+      "Tensor slot_mapping, "
+      "Tensor! out_q, int num_q_heads, int num_kv_heads, int head_dim, "
+      "Tensor k_scale, Tensor v_scale, Tensor? q_norm_weight, "
+      "Tensor? k_norm_weight, int qk_norm_policy, bool use_fp8) "
+      "-> Tensor");
+  xpu_ops.impl(
+      "fused_rope_norm_store_kv_fp8",
+      torch::kXPU,
+      &fused_rope_norm_store_kv_fp8);
 
   // Multi-modal Rotary Embedding (M-RoPE) — used by e.g. Qwen2-VL.
   // positions has shape [num_mrope_sections, num_tokens]; mrope_section is
@@ -147,12 +161,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("deepseek_inv_rope_bf16", torch::kXPU, &deepseek_inv_rope_bf16);
 
   // DeepSeek-V4 fused inverse RoPE + FP8 quantization: inv GPT-J rotation +
-  // per-128-block UE8M0 FP8 E4M3 quantization + group-major layout transform.
+  // block-scaled FP8 E4M3 quantization + group-major layout transform.
+  // use_mxfp8=False: per-128-block UE8M0 scales as float32.
+  // use_mxfp8=True:  per-32-block raw E8M0 scales (float8_e8m0fnu).
   xpu_ops.def(
       "deepseek_inv_rope_fp8_quant(Tensor attn_output, Tensor positions,"
       "                            Tensor cos_sin_cache, int n_groups,"
       "                            int heads_per_group, int nope_dim,"
-      "                            int rope_dim) -> (Tensor, Tensor)");
+      "                            int rope_dim, bool use_mxfp8=False)"
+      "                            -> (Tensor, Tensor)");
   xpu_ops.impl(
       "deepseek_inv_rope_fp8_quant", torch::kXPU, &deepseek_inv_rope_fp8_quant);
 
@@ -379,6 +396,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor num_sampled_tokens, int max_num_kept, int max_compact_support, "
       "int rows_per_request) -> (Tensor, Tensor, Tensor)");
   xpu_ops.impl("compact_sampling_mask", torch::kXPU, &compact_sampling_mask);
+
+  // Virtual memory management on PyTorch's SYCL context, mirroring cuMem*:
+  // reserve an address range, then map physical memory into it on demand.
+  xpu_ops.def("vmm_granularity(int device_index) -> int");
+  xpu_ops.impl("vmm_granularity", &vmm_granularity);
+  xpu_ops.def("vmm_reserve(int size) -> int");
+  xpu_ops.impl("vmm_reserve", &vmm_reserve);
+  xpu_ops.def("vmm_free_reserved(int ptr, int size) -> ()");
+  xpu_ops.impl("vmm_free_reserved", &vmm_free_reserved);
+  xpu_ops.def("vmm_create(int size, int device_index) -> int");
+  xpu_ops.impl("vmm_create", &vmm_create);
+  xpu_ops.def("vmm_map(int ptr, int size, int handle) -> ()");
+  xpu_ops.impl("vmm_map", &vmm_map);
+  xpu_ops.def("vmm_set_access(int ptr, int size, int device_index) -> ()");
+  xpu_ops.impl("vmm_set_access", &vmm_set_access);
+  xpu_ops.def("vmm_unmap(int ptr, int size) -> ()");
+  xpu_ops.impl("vmm_unmap", &vmm_unmap);
+  xpu_ops.def("vmm_release(int handle) -> ()");
+  xpu_ops.impl("vmm_release", &vmm_release);
+  xpu_ops.def(
+      "vmm_tensor_from_ptr(int ptr, int num_bytes, int device_index) -> "
+      "Tensor");
+  xpu_ops.impl("vmm_tensor_from_ptr", &vmm_tensor_from_ptr);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
