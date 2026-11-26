@@ -67,6 +67,14 @@ torch::Tensor fp4_gemm(
   onednn_not_built("fp4_gemm");
 }
 
+torch::Tensor mxfp4_gemm_w4a16(
+    const torch::Tensor& A,
+    const torch::Tensor& B,
+    const torch::Tensor& B_scale,
+    const std::optional<torch::Tensor>& bias) {
+  onednn_not_built("mxfp4_gemm_w4a16");
+}
+
 torch::Tensor int4_gemm_w4a16(
     const torch::Tensor& A_,
     const torch::Tensor& B,

@@ -1,9 +1,12 @@
+#include <algorithm>
+#include <limits>
 #include <vector>
 #include "fp4_gemm_w4a4.h"
 #include "fp8_gemm_w8a8.h"
 #include "fp8_gemm_w8a16.h"
 #include "int4_gemm_w4a16.h"
 #include "int4_gemm_w4a8.h"
+#include "mxfp4_gemm_w4a16.h"
 
 inline bool is_supported_fp8(at::ScalarType t) {
   return (t == at::ScalarType::Float8_e5m2) ||
@@ -251,6 +254,37 @@ torch::Tensor fp4_gemm(
   // check if nt format
   bool is_nt = B.strides()[B.dim() - 2] == 1;
   oneDNN::dnnl_matmul_w4a4_fp4(result, A, B, is_nt, bias, A_scale, B_scale);
+  return result;
+}
+
+torch::Tensor mxfp4_gemm_w4a16(
+    const torch::Tensor& A,
+    const torch::Tensor& B,
+    const torch::Tensor& B_scale,
+    const std::optional<torch::Tensor>& bias) {
+  const at::DeviceGuard device_guard(A.device());
+  TORCH_CHECK(
+      A.dim() == 2 && A.stride(1) == 1, "A must be [M, K] contiguous along K");
+  TORCH_CHECK(
+      is_supported_fp4(B.scalar_type()) && B.dim() == 2 && B.stride(0) == 1,
+      "B must be a [K/2, N] f4_e2m1x2 view of an [N, K/2] tensor");
+  const int64_t K = A.size(1), N = B.size(1);
+  TORCH_CHECK(K == 2 * B.size(0), "K mismatch");
+  TORCH_CHECK(K % 32 == 0, "K must be a multiple of 32, got ", K);
+  TORCH_CHECK(
+      std::max({A.size(0), K, N}) <= std::numeric_limits<int>::max(),
+      "M, N and K must fit in int32");
+  TORCH_CHECK(
+      B_scale.scalar_type() == at::ScalarType::Float8_e8m0fnu &&
+          B_scale.is_contiguous() && B_scale.dim() == 2 &&
+          B_scale.size(0) == K / 32 && B_scale.size(1) == N,
+      "B_scale must be contiguous [K/32, N] e8m0");
+  TORCH_CHECK(
+      !bias.has_value() || bias->is_contiguous(), "bias must be contiguous");
+  torch::Tensor result = at::empty({A.size(0), B.size(1)}, A.options());
+  if (A.size(0) > 0) {
+    oneDNN::dnnl_matmul_w4a16_mxfp4(result, A, B, bias, B_scale);
+  }
   return result;
 }
 
