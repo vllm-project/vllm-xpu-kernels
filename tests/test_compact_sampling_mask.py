@@ -15,6 +15,7 @@ VOCAB_SIZE = [128, 1024, 4096]
 MAX_NUM_KEPT = [8, 64, 512]
 INACTIVE_FRACTION = [0.0, 0.5, 1.0]
 FINITE_FRACTION = [0.0, 0.2, 0.5, 1.0]
+LOGITS_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
 
 # CI/mini scope parameter overrides
 MINI_PYTEST_PARAMS = {
@@ -28,10 +29,11 @@ MINI_PYTEST_PARAMS = {
 }
 
 
-def _make_logits(batch_size, vocab_size, finite_fraction, device):
+def _make_logits(batch_size, vocab_size, finite_fraction, device,
+                 dtype=torch.float32):
     logits = torch.randn(batch_size,
                          vocab_size,
-                         dtype=torch.float32,
+                         dtype=dtype,
                          device=device)
     if finite_fraction < 1.0:
         # Mask out (1 - finite_fraction) of the entries with -inf, mimicking
@@ -93,29 +95,20 @@ def _check_against_reference(logits, num_sampled_tokens, max_num_kept):
 @pytest.mark.parametrize("max_num_kept", MAX_NUM_KEPT)
 @pytest.mark.parametrize("inactive_fraction", INACTIVE_FRACTION)
 @pytest.mark.parametrize("finite_fraction", FINITE_FRACTION)
+@pytest.mark.parametrize("dtype", LOGITS_DTYPES)
 def test_compact_sampling_mask(batch_size, vocab_size, max_num_kept,
-                               inactive_fraction, finite_fraction):
+                               inactive_fraction, finite_fraction, dtype):
 
     seed_everything(42)
 
     max_num_kept = min(max_num_kept, vocab_size)
 
-    logits = _make_logits(batch_size, vocab_size, finite_fraction, DEVICE)
+    logits = _make_logits(batch_size, vocab_size, finite_fraction, DEVICE,
+                          dtype)
     num_sampled_tokens = _make_num_sampled_tokens(batch_size,
                                                   inactive_fraction, DEVICE)
 
     _check_against_reference(logits, num_sampled_tokens, max_num_kept)
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_compact_sampling_mask_reduced_precision_logits(dtype):
-    logits = torch.tensor(
-        [[0.5, float("-inf"), float("inf"), float("nan"), -1.0]],
-        dtype=dtype,
-        device=DEVICE)
-    num_sampled_tokens = torch.ones(1, dtype=torch.int32, device=DEVICE)
-
-    _check_against_reference(logits, num_sampled_tokens, max_num_kept=2)
 
 
 @pytest.mark.parametrize("batch_size", [4])
@@ -168,14 +161,15 @@ def test_compact_sampling_mask_all_inactive(batch_size, vocab_size):
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("vocab_size", [1024])
 @pytest.mark.parametrize("infinite_value", ["inf", "nan"])
+@pytest.mark.parametrize("dtype", LOGITS_DTYPES)
 def test_compact_sampling_mask_non_finite_values(batch_size, vocab_size,
-                                                 infinite_value):
+                                                 infinite_value, dtype):
     """+inf/nan logits must never be counted as finite/kept."""
     seed_everything(42)
 
     logits = torch.randn(batch_size,
                          vocab_size,
-                         dtype=torch.float32,
+                         dtype=dtype,
                          device=DEVICE)
     logits[:, ::2] = float(infinite_value)
     num_sampled_tokens = torch.ones(batch_size,
