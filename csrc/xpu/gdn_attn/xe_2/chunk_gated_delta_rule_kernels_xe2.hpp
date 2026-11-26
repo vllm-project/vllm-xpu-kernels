@@ -929,9 +929,9 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
   float* g_exp_slm_ptr = g_multi_slm_ptr + chunk_size;
 
   TiledMMA mma{};
-  // Same tile/SG tiling as mma (identical CLayout), but with a tf32 DPAS atom:
-  // full fp32 exponent range for the state-dependent gemms, at the same
-  // 11-bit operand precision as the 16-bit atoms.
+  // Same tile/SG tiling as mma (identical CLayout). tf32 DPAS atom when the
+  // state is fp32 (full fp32 exponent range, same 11-bit operand precision as
+  // the 16-bit atoms); identical 16-bit atom otherwise.
   TiledMMAState mma_state{};
   auto wg_tile = mma.tile_mnk();
 
@@ -1537,12 +1537,18 @@ void kernel_launcher(
       MMA_Atom<decltype(op)>,
       Layout<WGTileFwdO>,
       SGLayoutFwdO>::TiledMMA;
-  // tf32 DPAS atom for the state-dependent gemms: same tile/SG tiling and
-  // CLayout as MMAFwdO, but full fp32 exponent range (Xe2 has no fp32
-  // operand DPAS atom; tf32 keeps the 11-bit operand precision of the 16-bit
-  // atoms, so no precision regression).
+  // tf32 DPAS atom for the state-dependent gemms when the SSM state itself is
+  // fp32: same tile/SG tiling and CLayout as MMAFwdO, but full fp32 exponent
+  // range (Xe2 has no fp32 operand DPAS atom; tf32 keeps the 11-bit operand
+  // precision of the 16-bit atoms, so no precision regression). With 16-bit
+  // states, keep the 16-bit atom of MMAFwdO: the tf32 atom (K=8) is ~2x
+  // slower and brings no benefit since the state is read through a cast.
+  using StateAtom = std::conditional_t<
+      std::is_same_v<StateT, float>,
+      XE_DPAS_TT<8, float, tfloat32_t>,
+      XE_DPAS_TT<8, float, Element_non_CV>>;
   using MMAState = typename TiledMMAHelper<
-      MMA_Atom<XE_DPAS_TT<8, float, tfloat32_t>>,
+      MMA_Atom<StateAtom>,
       Layout<WGTileFwdO>,
       SGLayoutFwdO>::TiledMMA;
   auto mmaFwdO = MMAFwdO{};
