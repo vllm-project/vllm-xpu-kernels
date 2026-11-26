@@ -66,6 +66,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       torch::kXPU,
       &cutlass_grouped_gemm_interface);
 
+  xpu_ops.def(
+      "cutlass_batched_gemm_interface(Tensor input, Tensor weight, "
+      "Tensor? bias, Tensor(a!) output, Tensor rows_per_expert, int tile_m=0) "
+      "-> ()");
+  xpu_ops.impl(
+      "cutlass_batched_gemm_interface",
+      torch::kXPU,
+      &cutlass_batched_gemm_interface);
+
   #ifdef VLLM_XPU_ENABLE_XE2
   // Fused routed + shared-expert MoE for small-M decode (fp16/bf16 activations,
   // fp8-e4m3 per-tensor weights). tile_m = 0 selects the tile by M.
