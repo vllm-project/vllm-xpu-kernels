@@ -1,10 +1,24 @@
 #pragma once
 #include <sycl/sycl.hpp>
 
+#include <cstdint>
 #include <limits>
+#include <type_traits>
+
+#include "utils.h"
 
 namespace CompactSamplingMaskImpl {
-template <typename index_t, typename cu_index_t>
+template <typename logits_t>
+inline bool is_finite_logit(logits_t value) {
+  if constexpr (std::is_same_v<logits_t, sycl::ext::oneapi::bfloat16>) {
+    constexpr uint16_t exponent_mask = 0x7f80;
+    return (sycl::bit_cast<uint16_t>(value) & exponent_mask) != exponent_mask;
+  } else {
+    return sycl::isfinite(value);
+  }
+}
+
+template <typename index_t, typename cu_index_t, typename logits_t>
 struct compact_sampling_mask_kernel {
  public:
   static constexpr int sub_group_size = 16;
@@ -12,7 +26,7 @@ struct compact_sampling_mask_kernel {
   static constexpr int VEC_SIZE = 4;
 
   compact_sampling_mask_kernel(
-      const float* logits,
+      const logits_t* logits,
       const cu_index_t* cu_num_logits,
       const index_t* num_sampled_tokens,
       int* token_ids,
@@ -92,14 +106,14 @@ struct compact_sampling_mask_kernel {
     // Output layout is request-major with fixed slots, but the source logits
     // are CSR-packed per request: resolve the real logits row for this slot.
     const int source_row = static_cast<int>(cu_num_logits[req_idx]) + slot_idx;
-    const float* logits_ptr = logits + source_row * vocab_size;
+    const logits_t* logits_ptr = logits + source_row * vocab_size;
 
     // Same-sized "wave" (local_range * VEC_SIZE contiguous tokens) per
     // iteration for every work-item, so the group-wide scan/reduce calls
     // below stay convergent (every work-item calls them the same number
     // of times) and the compact token ids come out in increasing order,
     // matching the Triton kernel's per-block cumsum semantics.
-    using LogitsVecT = sycl::vec<float, VEC_SIZE>;
+    using LogitsVecT = vllm::xpu::aligned_vec<logits_t, VEC_SIZE>;
     using TokenIdVecT = sycl::vec<int, VEC_SIZE>;
     const int wave_size = local_range * VEC_SIZE;
     const int num_waves = (vocab_size + wave_size - 1) / wave_size;
@@ -113,7 +127,7 @@ struct compact_sampling_mask_kernel {
 
       // Load: one vec read for a full in-bounds chunk, scalar fallback
       // (padded with -inf, like Triton's `other=-inf`) for the tail.
-      float local_logits[VEC_SIZE];
+      logits_t local_logits[VEC_SIZE];
       if (full_load) {
         *reinterpret_cast<LogitsVecT*>(local_logits) =
             *reinterpret_cast<const LogitsVecT*>(logits_ptr + base);
@@ -123,7 +137,8 @@ struct compact_sampling_mask_kernel {
           const int idx = base + j;
           local_logits[j] = idx < vocab_size
                                 ? logits_ptr[idx]
-                                : -std::numeric_limits<float>::infinity();
+                                : static_cast<logits_t>(
+                                      -std::numeric_limits<float>::infinity());
         }
       }
 
@@ -133,7 +148,7 @@ struct compact_sampling_mask_kernel {
       int local_token_ids[VEC_SIZE];
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; ++j) {
-        keep[j] = sycl::isfinite(local_logits[j]);
+        keep[j] = is_finite_logit(local_logits[j]);
         if (keep[j]) {
           local_token_ids[local_keep++] = base + j;
         }
@@ -200,7 +215,7 @@ struct compact_sampling_mask_kernel {
   }
 
  private:
-  const float* logits;
+  const logits_t* logits;
   const cu_index_t* cu_num_logits;
   const index_t* num_sampled_tokens;
   int* token_ids;
@@ -212,10 +227,10 @@ struct compact_sampling_mask_kernel {
   const int vocab_size;
 };
 
-template <typename index_t, typename cu_index_t>
+template <typename index_t, typename cu_index_t, typename logits_t>
 void compact_sampling_mask_kernel_launcher(
     sycl::queue& queue,
-    const float* logits,
+    const logits_t* logits,
     const cu_index_t* cu_num_logits,
     const index_t* num_sampled_tokens,
     int* token_ids,
@@ -225,7 +240,7 @@ void compact_sampling_mask_kernel_launcher(
     const int rows_per_request,
     const int max_num_kept,
     const int vocab_size) {
-  using KERNEL = compact_sampling_mask_kernel<index_t, cu_index_t>;
+  using KERNEL = compact_sampling_mask_kernel<index_t, cu_index_t, logits_t>;
   auto range = KERNEL::get_nd_range(num_reqs, rows_per_request, vocab_size);
   queue.submit([&](sycl::handler& cgh) {
     KERNEL task(
