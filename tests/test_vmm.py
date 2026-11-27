@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+import time
+
 import pytest
 import torch
 
@@ -52,6 +54,8 @@ def test_vmm_commit_reduces_free_memory(device) -> None:
     torch.xpu.synchronize(device)
     # Earlier tests may leave the caching allocator holding most of the device.
     torch.xpu.empty_cache()
+    # Freed memory shows up in getMemoryInfo only after a delay.
+    time.sleep(1)
     free_before, _ = torch.ops._C_cache_ops.getMemoryInfo(device)
     if free_before < 2 * size:
         pytest.skip(f"Only {free_before} bytes free on xpu:{device}.")
