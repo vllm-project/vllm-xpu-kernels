@@ -49,11 +49,11 @@ act_softplus(float& x, float beta = 1.0f, float threshold = 20.0f) {
     return x;
 }
 
-template <typename T>
+template <typename OutT>
 CUTE_DEVICE void chunk_prepare_kernel(
     float* a,
     const float* A_log,
-    const T* dt_bias,
+    const OutT* dt_bias,
     const int* query_start_loc,
     const int total_virtual_seqlen,
     const int batch_size,
@@ -688,19 +688,19 @@ CUTE_DEVICE void chunk_inverse_opt_kernel(
   }
 }
 
-template <typename T, class TiledMMA>
+template <typename T, typename OutT, typename UT, class TiledMMA>
 CUTE_DEVICE void chunk_compute_wu_kernel(
     const sycl::local_accessor<float, 1>& slm_mem_const,
     T* A,
     T* w,
-    T* u,
+    UT* u,
     const T* q,
     const T* k,
     const T* v,
     const float* b,
     const float* a,
     const float* A_log,
-    const T* dt_bias,
+    const OutT* dt_bias,
     const int* query_start_loc,
     const bool* has_initial_state,
     const int total_virtual_seqlen,
@@ -881,13 +881,19 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
   }
 }
 
-template <typename T, typename StateT, class TiledMMA>
+template <
+    typename T,
+    typename StateT,
+    typename OutT,
+    typename UT,
+    class TiledMMA,
+    class TiledMMAState>
 CUTE_DEVICE void chunk_fwd_o_kernel(
     const sycl::local_accessor<float, 1>& slm_mem_const,  // [3 * chunk_size]
-    T* core_attn_out,  // [total_seqlen, num_v_heads, head_v_dim]
-    T* A,  // [num_v_heads, total_virtual_seqlen, chunk_size], temp O2 buffer
-    T* w,  // [num_v_heads, total_virtual_seqlen, head_k_dim]
-    T* u,  // [num_v_heads, total_virtual_seqlen, head_v_dim]
+    OutT* core_attn_out,  // [total_seqlen, num_v_heads, head_v_dim]
+    T* A,   // [num_v_heads, total_virtual_seqlen, chunk_size], temp O2 buffer
+    T* w,   // [num_v_heads, total_virtual_seqlen, head_k_dim]
+    UT* u,  // [num_v_heads, total_virtual_seqlen, head_v_dim]
     const T* q,  // [total_virtual_seqlen, num_k_heads, head_k_dim]
     const T* k,  // [total_virtual_seqlen, num_k_heads, head_k_dim]
     const float* a,
@@ -923,6 +929,10 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
   float* g_exp_slm_ptr = g_multi_slm_ptr + chunk_size;
 
   TiledMMA mma{};
+  // Same tile/SG tiling as mma (identical CLayout). tf32 DPAS atom when the
+  // state is fp32 (full fp32 exponent range, same 11-bit operand precision as
+  // the 16-bit atoms); identical 16-bit atom otherwise.
+  TiledMMAState mma_state{};
   auto wg_tile = mma.tile_mnk();
 
   static constexpr auto tile_m = get<0>(wg_tile);
@@ -1041,6 +1051,9 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       auto U_ptr = u + v_head_id * total_virtual_seqlen * head_v_dim +
                    chunk_offset * head_v_dim;
       auto U_tensor_shape = make_shape(chunk_size, head_v_dim);
+      // u is stored in UT (state dtype): the U path multiplies against the
+      // fp32 state and feeds the state update, so 16-bit storage would
+      // saturate before these gemms.
       auto U_tensor = make_tensor(
           make_gmem_ptr(U_ptr),
           make_layout(U_tensor_shape, make_stride(head_v_dim, _1{})));
@@ -1053,13 +1066,14 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
 
       Tensor cU = make_identity_tensor(U_tensor.shape());
 
-      auto copy_U_c = get_block_2d_copy_C<void>(mma, U_tensor);
-      auto copy_U_d = get_block_2d_copy_D<void>(mma, U_tensor);
+      auto copy_U_c = get_block_2d_copy_C<void>(mma_state, U_tensor);
+      auto copy_U_d = get_block_2d_copy_D<void>(mma_state, U_tensor);
 
       auto thr_copy_U_c = copy_U_c.get_slice(local_id);
       auto thr_copy_U_d = copy_U_d.get_slice(local_id);
 
       auto thr_mma = mma.get_slice(local_id);
+      auto thr_mma_state = mma_state.get_slice(local_id);
 
       auto q_ptr =
           q + chunk_offset * num_k_heads * head_k_dim + kv_head_id * head_k_dim;
@@ -1142,18 +1156,26 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
           // --- Fused WS+QS MMA: share S[dv] load in registers ---
           Tensor gU_C =
               local_tile(cU, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
-          auto tSrU_d = thr_mma.partition_sg_fragment_C(gU_C);
+          auto tSrU_d = thr_mma_state.partition_sg_fragment_C(gU_C);
           clear(tSrU_d);
 
           Tensor gO_C =
               local_tile(cO, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
-          auto tSrO_c = thr_mma.partition_sg_fragment_C(gO_C);
+          auto tSrO_c = thr_mma_state.partition_sg_fragment_C(gO_C);
           clear(tSrO_c);
 
           // Fused gemm: W×S[dv] -> tSrU_d, Q×S[dv] -> tSrO_c
-          // S is loaded once and reused in registers for both
+          // S is loaded once and reused in registers for both.
           gemm_TTS_fused_2A(
-              W_tensor, Q_tensor, S_tensor, tSrU_d, tSrO_c, 0, 0, dv, mma);
+              W_tensor,
+              Q_tensor,
+              S_tensor,
+              tSrU_d,
+              tSrO_c,
+              0,
+              0,
+              dv,
+              mma_state);
 
           // --- WS epilogue: U_new[dv] = U_old[dv] - W×S[dv] ---
           auto tCrU_d = thr_copy_U_d.partition_sg_fragment_S(gU_C);
@@ -1190,7 +1212,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
           sycl::group_barrier(item.get_group());
 
           // --- O2U MMA: O[dv] += O1[dv] + O2 × U_T[dv] ---
-          gemm_TTS(O2_tensor, U_tensor_T, tSrO_c, 0, dv, mma);
+          gemm_TTS(O2_tensor, U_tensor_T, tSrO_c, 0, dv, mma_state);
           auto tCrO_c = thr_copy_O_c.partition_sg_fragment_S(gO_C);
           auto tCgO_c = thr_copy_O_c.partition_D(gO_C);
           reorder(tSrO_c, tCrO_c);
@@ -1205,8 +1227,8 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
               K_tensor_T_shape, make_stride(_1{}, head_k_dim * num_k_heads)));
 
       Tensor cS = make_identity_tensor(S_tensor.shape());
-      auto copy_S_c = get_block_2d_copy_C<void>(mma, S_tensor);
-      auto copy_S_d = get_block_2d_copy_D<void>(mma, S_tensor);
+      auto copy_S_c = get_block_2d_copy_C<void>(mma_state, S_tensor);
+      auto copy_S_d = get_block_2d_copy_D<void>(mma_state, S_tensor);
       auto thr_copy_S_c = copy_S_c.get_slice(local_id);
       auto thr_copy_S_d = copy_S_d.get_slice(local_id);
 
@@ -1216,7 +1238,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
               local_tile(cS, wg_tile, make_coord(dv, dk, 0), Step<_1, _1, X>{});
           auto tCrS_d = thr_copy_S_d.partition_sg_fragment_S(gS_C);
           auto tCgS_d = thr_copy_S_d.partition_D(gS_C);
-          auto tSrS_d = thr_mma.partition_sg_fragment_C(gS_C);
+          auto tSrS_d = thr_mma_state.partition_sg_fragment_C(gS_C);
 
           // Seed accumulator with exp(g_last) * S_prev when previous state
           // exists; otherwise start from zeros.
@@ -1235,7 +1257,13 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
           }
 
           gemm_TTS_k_multi(
-              U_tensor_T, K_tensor_T, tSrS_d, dv, dk, mma, g_multi_slm_ptr);
+              U_tensor_T,
+              K_tensor_T,
+              tSrS_d,
+              dv,
+              dk,
+              mma_state,
+              g_multi_slm_ptr);
           reorder(tSrS_d, tCrS_d);
           copy(copy_S_d, tCrS_d, tCgS_d);
         }
@@ -1247,10 +1275,10 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
               local_tile(cO, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
           auto tCrO_c = thr_copy_O_c.partition_sg_fragment_S(gO_C);
           auto tCgO_c = thr_copy_O_c.partition_D(gO_C);
-          auto tSrO_c = thr_mma.partition_sg_fragment_C(gO_C);
+          auto tSrO_c = thr_mma_state.partition_sg_fragment_C(gO_C);
 
           clear(tSrO_c);
-          gemm_TTS(O2_tensor, U_tensor_T, tSrO_c, 0, dv, mma);
+          gemm_TTS(O2_tensor, U_tensor_T, tSrO_c, 0, dv, mma_state);
           reorder(tSrO_c, tCrO_c);
           copy(copy_O_c, tCrO_c, tCgO_c);
         }
@@ -1264,38 +1292,40 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
   }
 }
 
-template <typename T, typename StateTag>
+// The tag carries OutT so that each (T, StateT, OutT) launcher
+// instantiation registers a distinct SYCL kernel name.
+template <typename T, typename StateTag, typename OutTag>
 class ChunkPrepareKernel;
 
-template <typename T, typename StateTag>
+template <typename T, typename StateTag, typename OutTag>
 class ChunkComputeAKernel;
 
-template <typename T, typename StateTag>
+template <typename T, typename StateTag, typename OutTag>
 class ChunkInverseOptKernel;
 
-template <typename T, typename StateTag>
+template <typename T, typename StateTag, typename OutTag>
 class ChunkInverseKernel;
 
-template <typename T, typename StateTag>
+template <typename T, typename StateTag, typename OutTag>
 class ChunkComputeWUKernel;
 
-template <typename T, typename StateT>
+template <typename T, typename StateT, typename OutT>
 class ChunkFwdOKernel;
 
-template <typename T, typename StateT>
+template <typename T, typename StateT, typename OutT>
 void kernel_launcher(
     sycl::queue& queue,
-    T* core_attn_out,
+    OutT* core_attn_out,
     const T* q,
     const T* k,
     const T* v,
     T* A,
     T* w,
-    T* u,
+    void* u,
     const float* b,
     float* a,
     const float* A_log,
-    const T* dt_bias,
+    const OutT* dt_bias,
     StateT* ssm_state,
     const int ssm_state_stride_0,
     const int* query_start_loc,
@@ -1312,6 +1342,12 @@ void kernel_launcher(
     const int* checkpoint_state_indices) {
   using Element_non_CV = cutlass::platform::remove_cv_t<T>;
   auto op = XE_DPAS_TT<8, float, Element_non_CV>{};
+
+  // u is stored in the state dtype so the state-dependent path keeps fp32
+  // range: U_new = U_old - W x S and the state update U x K^T both
+  // read/write it. 16-bit state keeps 16-bit u.
+  using UT = std::conditional_t<std::is_same_v<StateT, float>, float, T>;
+  UT* u_ptr = static_cast<UT*>(u);
 
   int sm_count =
       cutlass::KernelHardwareInfo::query_device_multiprocessor_count(0);
@@ -1330,11 +1366,11 @@ void kernel_launcher(
   int slm_size_prepare = num_v_heads * 2 + chunk_size;
 
   queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for<ChunkPrepareKernel<T, StateT>>(
+    cgh.parallel_for<ChunkPrepareKernel<T, StateT, OutT>>(
         sycl::nd_range<3>{global_prepare * local_prepare, local_prepare},
         kernel_props,
         [=](auto) {
-          chunk_prepare_kernel<T>(
+          chunk_prepare_kernel<OutT>(
               a,
               A_log,
               dt_bias,
@@ -1363,7 +1399,7 @@ void kernel_launcher(
   queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_mem(
         sycl::range<1>(slm_size_compute_A), cgh);
-    cgh.parallel_for<ChunkComputeAKernel<T, StateT>>(
+    cgh.parallel_for<ChunkComputeAKernel<T, StateT, OutT>>(
         sycl::nd_range<3>{global_compute_A * local_compute_A, local_compute_A},
         kernel_props,
         [=](auto) {
@@ -1403,7 +1439,7 @@ void kernel_launcher(
         1);
 
     queue.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for<ChunkInverseOptKernel<T, StateT>>(
+      cgh.parallel_for<ChunkInverseOptKernel<T, StateT, OutT>>(
           sycl::nd_range<3>{global_inverse * local_inverse, local_inverse},
           kernel_props,
           [=](auto) {
@@ -1431,7 +1467,7 @@ void kernel_launcher(
     queue.submit([&](sycl::handler& cgh) {
       sycl::local_accessor<float, 1> local_mem(
           sycl::range<1>(slm_size_inverse), cgh);
-      cgh.parallel_for<ChunkInverseKernel<T, StateT>>(
+      cgh.parallel_for<ChunkInverseKernel<T, StateT, OutT>>(
           sycl::nd_range<3>{global_inverse * local_inverse, local_inverse},
           kernel_props,
           [=](auto) {
@@ -1466,16 +1502,16 @@ void kernel_launcher(
   queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_mem(
         sycl::range<1>(slm_size_compute_wu), cgh);
-    cgh.parallel_for<ChunkComputeWUKernel<T, StateT>>(
+    cgh.parallel_for<ChunkComputeWUKernel<T, StateT, OutT>>(
         sycl::nd_range<3>{
             global_compute_wu * local_compute_wu, local_compute_wu},
         kernel_props,
         [=](auto) {
-          chunk_compute_wu_kernel<T, MMAComputeWU>(
+          chunk_compute_wu_kernel<T, OutT, UT, MMAComputeWU>(
               local_mem,
               A,
               w,
-              u,
+              u_ptr,
               q,
               k,
               v,
@@ -1501,6 +1537,20 @@ void kernel_launcher(
       MMA_Atom<decltype(op)>,
       Layout<WGTileFwdO>,
       SGLayoutFwdO>::TiledMMA;
+  // tf32 DPAS atom for the state-dependent gemms when the SSM state itself is
+  // fp32: same tile/SG tiling and CLayout as MMAFwdO, but full fp32 exponent
+  // range (Xe2 has no fp32 operand DPAS atom; tf32 keeps the 11-bit operand
+  // precision of the 16-bit atoms, so no precision regression). With 16-bit
+  // states, keep the 16-bit atom of MMAFwdO: the tf32 atom (K=8) is ~2x
+  // slower and brings no benefit since the state is read through a cast.
+  using StateAtom = std::conditional_t<
+      std::is_same_v<StateT, float>,
+      XE_DPAS_TT<8, float, tfloat32_t>,
+      XE_DPAS_TT<8, float, Element_non_CV>>;
+  using MMAState = typename TiledMMAHelper<
+      MMA_Atom<StateAtom>,
+      Layout<WGTileFwdO>,
+      SGLayoutFwdO>::TiledMMA;
   auto mmaFwdO = MMAFwdO{};
   int MaxThreadsPerWorkgroupFwdO = size(mmaFwdO);
   sycl::range<3> local_fwd_o(1, 1, MaxThreadsPerWorkgroupFwdO);
@@ -1510,16 +1560,16 @@ void kernel_launcher(
   queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_mem(
         sycl::range<1>(slm_size_fwd_o), cgh);
-    cgh.parallel_for<ChunkFwdOKernel<T, StateT>>(
+    cgh.parallel_for<ChunkFwdOKernel<T, StateT, OutT>>(
         sycl::nd_range<3>{global_fwd_o * local_fwd_o, local_fwd_o},
         kernel_props,
         [=](auto) {
-          chunk_fwd_o_kernel<T, StateT, MMAFwdO>(
+          chunk_fwd_o_kernel<T, StateT, OutT, UT, MMAFwdO, MMAState>(
               local_mem,
               core_attn_out,
               A,
               w,
-              u,
+              u_ptr,
               q,
               k,
               a,
@@ -1586,41 +1636,60 @@ void chunk_gated_delta_rule_impl_xe2(
       A_log.scalar_type());
   TORCH_CHECK(
       dt_bias.scalar_type() == core_attn_out.scalar_type(),
-      "dt_bias dtype must match core_attn_out dtype (float16/bfloat16), but "
-      "got dt_bias=",
+      "dt_bias dtype must match core_attn_out dtype "
+      "(float16/bfloat16/float32), but got dt_bias=",
       dt_bias.scalar_type(),
       ", core_attn_out=",
       core_attn_out.scalar_type());
+  // q/k/v share the operand dtype: the A/w/u buffers and every 16-bit
+  // pointer in the launcher are typed from it. A/w/u are always allocated
+  // in q.dtype(), so a mismatch would be silently misinterpreted by the
+  // kernels.
+  TORCH_CHECK(
+      q.scalar_type() == k.scalar_type() && q.scalar_type() == v.scalar_type(),
+      "q/k/v must share one dtype, but got q=",
+      q.scalar_type(),
+      " k=",
+      k.scalar_type(),
+      " v=",
+      v.scalar_type());
 
-  auto dtype = core_attn_out.dtype();
+  // Intermediate buffers are operand-level: they track the q/k/v dtype, while
+  // core_attn_out may be widened (e.g. fp32 out + fp16 ops) to avoid a
+  // low-precision readout of an unnormalized SSM state.
+  // u (U_old/U_new) follows the state dtype instead: U_new = U_old - W x S
+  // and the state update U x K^T are state-dependent, and a 16-bit u would
+  // saturate before the gemms when the state is fp32.
+  auto operand_dtype = q.dtype();
+  auto u_dtype = ssm_state.dtype();
   auto device = core_attn_out.device();
 
   int padding_size = batch_size * (chunk_size - 1);
 
   torch::Tensor A = torch::zeros(
       {num_v_heads, total_seqlen + padding_size, chunk_size},
-      torch::dtype(dtype).device(device).requires_grad(false));
+      torch::dtype(operand_dtype).device(device).requires_grad(false));
   torch::Tensor w = torch::zeros(
       {num_v_heads, total_seqlen + padding_size, head_k_dim},
-      torch::dtype(dtype).device(device).requires_grad(false));
+      torch::dtype(operand_dtype).device(device).requires_grad(false));
   torch::Tensor u = torch::zeros(
       {num_v_heads, total_seqlen + padding_size, head_v_dim},
-      torch::dtype(dtype).device(device).requires_grad(false));
+      torch::dtype(u_dtype).device(device).requires_grad(false));
 
-#define KERNEL_LAUNCHER(scalar_t, state_scalar_t)                  \
-  kernel_launcher<scalar_t, state_scalar_t>(                       \
+#define KERNEL_LAUNCHER(scalar_t, state_scalar_t, out_scalar_t)    \
+  kernel_launcher<scalar_t, state_scalar_t, out_scalar_t>(         \
       queue,                                                       \
-      reinterpret_cast<scalar_t*>(core_attn_out.data_ptr()),       \
+      reinterpret_cast<out_scalar_t*>(core_attn_out.data_ptr()),   \
       reinterpret_cast<scalar_t*>(q.data_ptr()),                   \
       reinterpret_cast<scalar_t*>(k.data_ptr()),                   \
       reinterpret_cast<scalar_t*>(v.data_ptr()),                   \
       reinterpret_cast<scalar_t*>(A.data_ptr()),                   \
       reinterpret_cast<scalar_t*>(w.data_ptr()),                   \
-      reinterpret_cast<scalar_t*>(u.data_ptr()),                   \
+      reinterpret_cast<void*>(u.data_ptr()),                       \
       reinterpret_cast<float*>(b.data_ptr()),                      \
       reinterpret_cast<float*>(a.data_ptr()),                      \
       reinterpret_cast<float*>(A_log.data_ptr()),                  \
-      reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),             \
+      reinterpret_cast<out_scalar_t*>(dt_bias.data_ptr()),         \
       reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),     \
       ssm_state_stride_0,                                          \
       reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
@@ -1638,17 +1707,17 @@ void chunk_gated_delta_rule_impl_xe2(
       checkpoint_offsets,                                          \
       checkpoint_state_indices);
 
-#define DISPATCH_STATE_DTYPE(scalar_t)                                  \
+#define DISPATCH_STATE_DTYPE(scalar_t, out_scalar_t)                    \
   do {                                                                  \
     if (ssm_state.scalar_type() == at::kFloat) {                        \
       using state_scalar_t = float;                                     \
-      KERNEL_LAUNCHER(scalar_t, state_scalar_t)                         \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t, out_scalar_t)           \
     } else if (ssm_state.scalar_type() == at::kBFloat16) {              \
       using state_scalar_t = bfloat16_t;                                \
-      KERNEL_LAUNCHER(scalar_t, state_scalar_t)                         \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t, out_scalar_t)           \
     } else if (ssm_state.scalar_type() == at::kHalf) {                  \
       using state_scalar_t = half_t;                                    \
-      KERNEL_LAUNCHER(scalar_t, state_scalar_t)                         \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t, out_scalar_t)           \
     } else {                                                            \
       TORCH_CHECK(                                                      \
           false,                                                        \
@@ -1658,15 +1727,44 @@ void chunk_gated_delta_rule_impl_xe2(
   } while (0)
 
   if (core_attn_out.scalar_type() == at::kBFloat16) {
+    TORCH_CHECK(
+        q.scalar_type() == at::kBFloat16,
+        "core_attn_out must match the q/k/v dtype when it is bfloat16, "
+        "but got core_attn_out=bfloat16 q=",
+        q.scalar_type());
     using scalar_t = bfloat16_t;
-    DISPATCH_STATE_DTYPE(scalar_t);
+    using out_scalar_t = bfloat16_t;
+    DISPATCH_STATE_DTYPE(scalar_t, out_scalar_t);
   } else if (core_attn_out.scalar_type() == at::kHalf) {
+    TORCH_CHECK(
+        q.scalar_type() == at::kHalf,
+        "core_attn_out must match the q/k/v dtype when it is float16, "
+        "but got core_attn_out=float16 q=",
+        q.scalar_type());
     using scalar_t = half_t;
-    DISPATCH_STATE_DTYPE(scalar_t);
+    using out_scalar_t = half_t;
+    DISPATCH_STATE_DTYPE(scalar_t, out_scalar_t);
+  } else if (core_attn_out.scalar_type() == at::kFloat) {
+    if (q.scalar_type() == at::kBFloat16) {
+      using scalar_t = bfloat16_t;
+      using out_scalar_t = float;
+      DISPATCH_STATE_DTYPE(scalar_t, out_scalar_t);
+    } else if (q.scalar_type() == at::kHalf) {
+      using scalar_t = half_t;
+      using out_scalar_t = float;
+      DISPATCH_STATE_DTYPE(scalar_t, out_scalar_t);
+    } else {
+      TORCH_CHECK(
+          false,
+          "q/k/v dtype must be float16/bfloat16 with a float32 "
+          "core_attn_out, but got ",
+          q.scalar_type());
+    }
   } else {
     TORCH_CHECK(
         false,
-        "core_attn_out dtype must be float16/bfloat16, but got ",
+        "core_attn_out dtype must be float16/bfloat16/float32, but "
+        "got ",
         core_attn_out.scalar_type());
   }
 

@@ -289,8 +289,6 @@ CUTE_DEVICE void gemm_TTS_k_multi(
     float* K_multi) {
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   int local_id = item.get_local_linear_id();
-  auto sg = item.get_sub_group();
-  int sg_local_id = sg.get_local_linear_id();
 
   Tensor cA = make_identity_tensor(A.shape());
   Tensor cB = make_identity_tensor(B.shape());
@@ -298,6 +296,8 @@ CUTE_DEVICE void gemm_TTS_k_multi(
   auto wg_tile = mma.tile_mnk();
   auto wg_coord = make_coord(wg_m, wg_n, 0);
 
+  // cA/cB are coordinate tensors: values are the (m,k)/(n,k) pairs, so the
+  // fragments partitioned from them recover each element's true K column.
   Tensor gA = local_tile(
       cA, select<0, 2>(wg_tile), make_coord(wg_m, _));  // (BLK_M,BLK_K,k)
   Tensor gB = local_tile(
@@ -312,6 +312,11 @@ CUTE_DEVICE void gemm_TTS_k_multi(
 
   auto tCrA = thr_mma.partition_sg_fragment_A(gA(_, _, 0));
   auto tCrB = thr_mma.partition_sg_fragment_B(gB(_, _, 0));
+  // A-fragment coordinates, kept separately because tCrA is overwritten with
+  // data values before the per-K scale is applied. partition_A (unlike the
+  // sg_fragment variants) keeps the identity coordinates instead of recasting
+  // them to the MMA operand value type.
+  auto tCrA_id = thr_mma.partition_A(gA(_, _, 0));
 
   auto tArA = thr_copy_a.partition_sg_fragment_D(gA(_, _, 0));
   auto tBrB = thr_copy_b.partition_sg_fragment_D(gB(_, _, 0));
@@ -360,15 +365,30 @@ CUTE_DEVICE void gemm_TTS_k_multi(
     static constexpr auto I = decltype(size<0>(A_frag))::value;
     static constexpr auto J = decltype(size<1>(A_frag))::value;
     static constexpr auto K = decltype(size<2>(A_frag))::value;
-    static constexpr int mma_K = 16;
 
+    // Per-K scale indexed by the element's true K column from the identity
+    // fragment, instead of assuming a fixed atom K (16 for 16-bit DPAS).
+    // Generalizes to the tf32 atom (K=8) used by the state-dependent gemms.
+    // The A-fragment element is the atom's operand type (e.g. tfloat32_t),
+    // which differs from A's gmem element type (float) on the tf32 path.
+    using frag_a_t = typename TiledMMA::Atom::FrgTypeA;
     CUTE_UNROLL
     for (int k = 0; k < K; ++k) {
-      float scale = K_multi[k_tile * get<2>(wg_tile) + k * mma_K + sg_local_id];
       CUTE_UNROLL
-      for (int e = 0; e < I * J; ++e) {
-        tCrA[k * I * J + e] =
-            static_cast<TA>(static_cast<float>(tCrA[k * I * J + e]) * scale);
+      for (int m = 0; m < J; ++m) {
+        CUTE_UNROLL
+        for (int v = 0; v < I; ++v) {
+          // Flat index of (v, m, k) in the compact (V, M, K) fragment layout;
+          // tCrA_id shares that layout, so (v, m, k) names the same element in
+          // both fragments.
+          auto idx = v + I * m + I * J * k;
+          // True K column: within-slice column from the identity fragment plus
+          // the k-tile base (tCrA_id was partitioned from k-tile 0).
+          int k_col = k_tile * get<2>(wg_tile) +
+                      static_cast<int>(get<1>(tCrA_id(v, m, k)));
+          tCrA[idx] = static_cast<frag_a_t>(
+              static_cast<float>(tCrA[idx]) * K_multi[k_col]);
+        }
       }
     }
 
