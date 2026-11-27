@@ -437,6 +437,9 @@ inline void projection(
 #include "minicpm5/reference_attention.h"
 #include "minicpm5/reference_router.h"
 #include "minicpm5/reference_moe.h"
+#if defined(MINICPM5_MONO_FP16) && defined(MINICPM5_MONO_REFERENCE_MOE_ENABLED)
+  #include "minicpm5/reference_moe_tail8_n32.h"
+#endif
 #include "minicpm5/reference_gemv.h"
 
 #ifdef MINICPM5_MONO_DPAS_ENABLED
@@ -624,12 +627,19 @@ void launch(sycl::queue& queue, Weights weights, Workspace work, Step step) {
 #ifdef MINICPM5_MONO_FP16
   static_assert(!FastVerify || (Rows == 8 && IgnorePadding));
   constexpr bool VerifyBatch = FastVerify && LocalProjection && LocalSelection;
+  // One work-group publishes each row's Top16 in the Rows4 tails.
+  constexpr bool RowRouter =
+      VerifyBatch ||
+      (Rows == 4 && !Dense && LocalProjection && LocalSelection &&
+       ((TP == 1 && Input == LayerInput::PostAttentionNormRows4) ||
+        (TP == 2 && Input == LayerInput::GatedAttention)));
 #else
   constexpr bool VerifyBatch = false;
+  constexpr bool RowRouter = false;
 #endif
   constexpr bool FromPreO = Input == LayerInput::GatedAttention;
   constexpr bool FromPostO = Input == LayerInput::OutputProjection;
-  constexpr bool AlternateGuPartial = FromPreO || FromPostO;
+  constexpr bool AlternateGuPartial = (FromPreO || FromPostO) && Rows == 8;
   constexpr int AdditionalGuPartial = AlternateGuPartial ? Rows * H : 0;
   constexpr bool TailRows4 = Input == LayerInput::PostAttentionNormRows4;
   constexpr bool TailOnly = TailRows4 || Input == LayerInput::PostAttentionNorm;
@@ -641,8 +651,9 @@ void launch(sycl::queue& queue, Weights weights, Workspace work, Step step) {
        !FastVerify && !FixedVerifyPages && !CombinedOrdinaryM8));
   static_assert(
       !(FromPreO || FromPostO) ||
-      (TP == 2 && Rows == 8 && !Dense && FixedVerifyPages && VerifyBatch &&
-       !CombinedOrdinaryM8));
+      (TP == 2 && !Dense && !CombinedOrdinaryM8 &&
+       ((Rows == 8 && FixedVerifyPages && VerifyBatch) ||
+        (FromPreO && Rows == 4 && IgnorePadding && !VerifyBatch))));
   static_assert(
       !CombinedOrdinaryM8 ||
       (TP == 1 && Rows == 8 && !Dense && FixedVerifyPages));
@@ -1205,7 +1216,8 @@ void launch(sycl::queue& queue, Weights weights, Workspace work, Step step) {
                 reference_b1_shared_preload(item, weights, b1_shared_raw);
               }
 #ifdef MINICPM5_MONO_REFERENCE_PROJECTION_ENABLED
-              if constexpr (CombinedOrdinaryM8 || FromPreO) {
+              if constexpr (
+                  CombinedOrdinaryM8 || (FromPreO && BatchedPrPreload)) {
                 // Weight prefetch precedes input packing and the optional wait.
                 reference_batched_projection_preload<
                     OutputProjectionChunks,
@@ -1344,9 +1356,12 @@ void launch(sycl::queue& queue, Weights weights, Workspace work, Step step) {
               const float values[2] = {first, second};
 #pragma unroll
               for (int j = 0; j < 2; ++j) {
-                const float residual = float(scalar_t(
-                    float(step.hidden[n + j]) +
-                    (step.residual ? float(step.residual[n + j]) : 0.f)));
+                const float residual =
+                    FromPreO ? float(step.residual[n + j])
+                             : float(scalar_t(
+                                   float(step.hidden[n + j]) +
+                                   (step.residual ? float(step.residual[n + j])
+                                                  : 0.f)));
                 step.res_out[n + j] =
                     scalar_t(float(scalar_t(values[j])) + residual);
               }
@@ -1485,7 +1500,7 @@ void launch(sycl::queue& queue, Weights weights, Workspace work, Step step) {
           if constexpr (!Dense && Matrix) {
             if (!reference_router_finish < Rows,
                 TP == 2 && Rows == 1,
-                VerifyBatch,
+                RowRouter,
                 TailRows4 > (item,
                              weights,
                              work,
@@ -1522,7 +1537,7 @@ void launch(sycl::queue& queue, Weights weights, Workspace work, Step step) {
             static_assert(NormWords >= Rows * Top);
 #endif
 #ifdef MINICPM5_MONO_REFERENCE_MOE_ENABLED
-            if constexpr (VerifyBatch) {
+            if constexpr (RowRouter) {
               static_assert(TemporaryWords >= Rows * E + 4 * RouterSortSize);
               if (wg < Rows)
                 reference_router_select_row(
@@ -1605,7 +1620,7 @@ void launch(sycl::queue& queue, Weights weights, Workspace work, Step step) {
                   }
               }
             }
-            if constexpr (LocalSelection && !VerifyBatch) {
+            if constexpr (LocalSelection && !RowRouter) {
               if (!sycl::all_of_group(item.get_group(), selection_ok)) return;
 #ifdef MINICPM5_MONO_REFERENCE_PROJECTION_ENABLED
             } else if constexpr (FixedVerifyPages) {
@@ -1625,7 +1640,7 @@ void launch(sycl::queue& queue, Weights weights, Workspace work, Step step) {
                 return;
             }
 #ifdef MINICPM5_MONO_REFERENCE_MOE_ENABLED
-            if constexpr (VerifyBatch) {
+            if constexpr (RowRouter) {
               if (lid < Rows * Top) {
                 local_selected[lid] = work.experts[lid];
                 local_routing[lid] = work.routing[lid];
@@ -1652,7 +1667,7 @@ void launch(sycl::queue& queue, Weights weights, Workspace work, Step step) {
               if constexpr ((VerifyBatch && Rows == 8) || Rows == 4) {
                 static_assert(TemporaryWords >= Rows * E + E / 16);
                 // Ordinary selection reads router scores from this SLM.
-                if constexpr (!VerifyBatch) reference_wg_bar(item.get_group());
+                if constexpr (!RowRouter) reference_wg_bar(item.get_group());
                 reference_expert_union_indexed<Rows, IgnorePadding>(
                     item,
                     local_selected,
@@ -1701,19 +1716,37 @@ void launch(sycl::queue& queue, Weights weights, Workspace work, Step step) {
                     local_count[0]);
               }
               grid_signal(item, step.control, 9, call, step.health);
-              if (!reference_moe_down<TP, Rows, IgnorePadding>(
-                      item,
-                      weights,
-                      work,
-                      local_routing,
-                      local_experts,
-                      local_choices,
-                      local_count[0],
-                      reinterpret_cast<scalar_t*>(reduction_storage),
-                      routed,
-                      reinterpret_cast<float*>(reference_storage),
-                      step,
-                      call))
+  #ifdef MINICPM5_MONO_FP16
+              if constexpr (TP == 1 && Rows == 8 && TailOnly) {
+                static_assert(IgnorePadding);
+                if (!reference_moe_down_tail8_n32(
+                        item,
+                        weights,
+                        work,
+                        local_routing,
+                        local_experts,
+                        local_choices,
+                        local_count[0],
+                        reinterpret_cast<scalar_t*>(reduction_storage),
+                        routed,
+                        step,
+                        call))
+                  return;
+              } else
+  #endif
+                  if (!reference_moe_down<TP, Rows, IgnorePadding>(
+                          item,
+                          weights,
+                          work,
+                          local_routing,
+                          local_experts,
+                          local_choices,
+                          local_count[0],
+                          reinterpret_cast<scalar_t*>(reduction_storage),
+                          routed,
+                          reinterpret_cast<float*>(reference_storage),
+                          step,
+                          call))
                 return;
             } else {
               reference_moe_gateup_m1<TP>(

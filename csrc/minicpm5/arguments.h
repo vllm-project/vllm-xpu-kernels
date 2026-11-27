@@ -155,6 +155,12 @@ void dispatch_pre_o(
     WorkspacePointers<sycl::half> work,
     StepPointers<sycl::half> step);
 
+void dispatch_pre_o_rows4(
+    sycl::queue& queue,
+    WeightPointers<sycl::half> weights,
+    WorkspacePointers<sycl::half> work,
+    StepPointers<sycl::half> step);
+
 void dispatch_post_o(
     sycl::queue& queue,
     WeightPointers<sycl::half> weights,

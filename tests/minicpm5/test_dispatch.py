@@ -58,6 +58,7 @@ def test_device_probe(native):
         ("decode_tail_rows4", 8, "post-attention activation"),
         ("decode_tail", 4, "post-attention activation"),
         ("decode_pre_o", 4, "gated attention"),
+        ("decode_pre_o_rows4", 8, "gated attention"),
         ("decode_post_o", 4, "O projection partial"),
     ],
 )
@@ -73,7 +74,7 @@ def test_split_rejects_wrong_physical_rows(native, op_name, wrong_rows, match):
             native.control_words(), dtype=torch.int32, device="xpu"
         )
         owner = torch.classes.minicpm5_mono.Region(native.mailbox_bytes())
-        if op_name in {"decode_pre_o", "decode_post_o"}:
+        if op_name in {"decode_pre_o", "decode_pre_o_rows4", "decode_post_o"}:
             args = (activation, activation, slots, activation, activation)
         else:
             args = (activation, slots, activation)

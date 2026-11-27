@@ -729,7 +729,7 @@ void decode_tail(
         step.as<sycl::half>());
 }
 
-template <bool PostO>
+template <bool PostO, int Rows = MaxRows>
 void decode_attention_tail(
     const Tensor& activation,
     const Tensor& residual,
@@ -750,13 +750,13 @@ void decode_attention_tail(
   check_tensor(
       activation,
       dtype,
-      {MaxRows, H},
+      {Rows, H},
       PostO ? "O projection partial" : "gated attention",
       device);
-  check_tensor(residual, dtype, {MaxRows, H}, "rounded input residual", device);
-  check_tensor(slots, at::kLong, {MaxRows}, "slot mapping", device);
-  check_tensor(output, dtype, {MaxRows, H}, "output", device);
-  check_tensor(res_out, dtype, {MaxRows, H}, "output residual", device);
+  check_tensor(residual, dtype, {Rows, H}, "rounded input residual", device);
+  check_tensor(slots, at::kLong, {Rows}, "slot mapping", device);
+  check_tensor(output, dtype, {Rows, H}, "output", device);
+  check_tensor(res_out, dtype, {Rows, H}, "output residual", device);
   check_tensor(control, at::kInt, {ControlWords}, "control", device);
   auto weights = check_weights(tensors, 2, false, device, dtype);
   auto work = check_workspace(workspace, 2, device, dtype);
@@ -780,6 +780,12 @@ void decode_attention_tail(
   auto& queue = c10::xpu::getCurrentXPUStream().queue();
   if constexpr (PostO)
     mono_fp16::dispatch_post_o(
+        queue,
+        weights.as<sycl::half>(),
+        work.as<sycl::half>(),
+        step.as<sycl::half>());
+  else if constexpr (Rows == 4)
+    mono_fp16::dispatch_pre_o_rows4(
         queue,
         weights.as<sycl::half>(),
         work.as<sycl::half>(),
@@ -1411,6 +1417,13 @@ TORCH_LIBRARY(minicpm5_mono, m) {
       "__torch__.torch.classes.minicpm5_mono.Region region, int mailbox_slot) "
       "-> ()",
       &decode_attention_tail<false>);
+  m.def(
+      "decode_pre_o_rows4(Tensor attention, Tensor residual, Tensor slots, "
+      "Tensor(a!) output, Tensor(b!) res_out, Tensor(c!)[] workspace, "
+      "Tensor(d!) control, Tensor[] weights, "
+      "__torch__.torch.classes.minicpm5_mono.Region region, int mailbox_slot) "
+      "-> ()",
+      &decode_attention_tail<false, 4>);
   m.def("post_o_abi_version() -> int", []() -> int64_t { return 1; });
   m.def(
       "decode_post_o(Tensor projection, Tensor residual, Tensor slots, "

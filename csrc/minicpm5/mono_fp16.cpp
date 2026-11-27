@@ -112,6 +112,20 @@ void dispatch_pre_o(
       LayerInput::GatedAttention>(queue, weights, work, step);
 }
 
+void dispatch_pre_o_rows4(
+    sycl::queue& queue, Weights weights, Workspace work, Step step) {
+  launch<
+      2,
+      4,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      LayerInput::GatedAttention>(queue, weights, work, step);
+}
+
 void dispatch_post_o(
     sycl::queue& queue, Weights weights, Workspace work, Step step) {
   launch<
