@@ -1,0 +1,116 @@
+name: PR kernel microbenchmark
+
+# Triggered by a `/microbench [ops=...]` comment on a PR. Runs from the default
+# branch, so PR authors cannot modify this workflow or the bridge script.
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  authorize:
+    if: >-
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/microbench')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    outputs:
+      authorized: ${{ steps.check.outputs.authorized }}
+      pr: ${{ steps.check.outputs.pr }}
+      sha: ${{ steps.check.outputs.sha }}
+      ops: ${{ steps.check.outputs.ops }}
+      user: ${{ steps.check.outputs.user }}
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Check permission and parse command
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/pr_microbenchmark.py authorize
+
+  run:
+    needs: authorize
+    if: needs.authorize.outputs.authorized == 'true'
+    # Dedicated runner holding the Jenkins credentials; it must not run
+    # pull_request jobs.
+    runs-on: self-hosted-microbench
+    timeout-minutes: 720
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      statuses: write
+    concurrency:
+      group: pr-microbenchmark-${{ needs.authorize.outputs.pr }}
+      cancel-in-progress: false
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      PR: ${{ needs.authorize.outputs.pr }}
+      SHA: ${{ needs.authorize.outputs.sha }}
+      OPS: ${{ needs.authorize.outputs.ops }}
+      REQUESTER: ${{ needs.authorize.outputs.user }}
+      SCRIPT: .github/scripts/pr_microbenchmark.py
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+          clean: true
+          sparse-checkout: .github/scripts
+
+      - name: Report queued
+        id: queued
+        run: python3 "$SCRIPT" report --state queued
+
+      - name: Trigger Jenkins
+        id: trigger
+        run: python3 "$SCRIPT" trigger
+
+      - name: Wait for Jenkins build to start
+        id: start
+        env:
+          QUEUE_URL: ${{ steps.trigger.outputs.queue_url }}
+        run: python3 "$SCRIPT" wait-start
+
+      - name: Report running
+        env:
+          COMMENT_ID: ${{ steps.queued.outputs.comment_id }}
+          BUILD_URL: ${{ steps.start.outputs.build_url }}
+        run: python3 "$SCRIPT" report --state running
+
+      - name: Wait for Jenkins build to finish
+        id: wait
+        env:
+          BUILD_URL: ${{ steps.start.outputs.build_url }}
+          SUMMARY_FILE: ${{ runner.temp }}/pr_summary.json
+        run: python3 "$SCRIPT" wait
+
+      - name: Stop Jenkins on cancel or failure
+        # Skip once Jenkins reported a terminal result; otherwise free the node.
+        if: >-
+          (cancelled() || failure()) &&
+          steps.trigger.outputs.queue_url != '' &&
+          steps.wait.outputs.result == ''
+        env:
+          QUEUE_URL: ${{ steps.trigger.outputs.queue_url }}
+          BUILD_URL: ${{ steps.start.outputs.build_url }}
+        run: python3 "$SCRIPT" stop
+
+      - name: Report result
+        if: always() && steps.queued.outputs.comment_id != ''
+        env:
+          COMMENT_ID: ${{ steps.queued.outputs.comment_id }}
+          BUILD_URL: ${{ steps.start.outputs.build_url }}
+          JENKINS_RESULT: ${{ steps.wait.outputs.result }}
+          JOB_STATUS: ${{ job.status }}
+          SUMMARY_FILE: ${{ runner.temp }}/pr_summary.json
+        run: python3 "$SCRIPT" report --state final
