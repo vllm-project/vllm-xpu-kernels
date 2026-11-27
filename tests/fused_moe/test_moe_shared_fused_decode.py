@@ -13,8 +13,13 @@ HIDDEN = 2048
 NUM_EXPERTS = 256
 TOP_K = 8
 
+moe_op_available = is_available() and torch.xpu.is_available()
+requires_moe_op = pytest.mark.skipif(
+    not moe_op_available, reason="moe_shared_fused_decode op and XPU required")
 requires_moe_kernel = pytest.mark.skipif(
-    not is_available(), reason="moe_shared_fused_decode op not built")
+    not (moe_op_available and interface._is_supported_device(-1)),
+    reason="moe_shared_fused_decode requires a built op on a Battlemage GPU",
+)
 
 
 def quant_fp8_per_tensor(w: torch.Tensor):
@@ -88,7 +93,7 @@ def make_op(weights, tile_m=0):
 
 
 @pytest.mark.parametrize("argument", ["w13", "w2", "shared_w13", "shared_w2"])
-@requires_moe_kernel
+@requires_moe_op
 def test_moe_plan_rejects_noncontiguous_prepared_weights(argument):
     """Noncontiguous weights must be prepared by the caller."""
     weights = make_weights(32, hidden=256, num_experts=8)
@@ -235,29 +240,29 @@ def test_moe_shared_fused_decode_rejects_mixed_shared_gate_dtype():
 )
 def test_moe_activation_dtype_contract(monkeypatch, dtype, supported):
     monkeypatch.setattr(interface, "is_available", lambda: True)
+    monkeypatch.setattr(torch.xpu, "is_available", lambda: True)
+    monkeypatch.setattr(interface, "_is_supported_device", lambda _: True)
     assert (interface.supports(dtype, torch.float8_e4m3fn, 8, 2048, 256)
             is supported)
 
 
-@pytest.mark.parametrize(
-    "xe2,xe3,supported",
-    [(True, False, True), (False, True, True), (False, False, False)],
-)
-def test_moe_supports_device_architecture(monkeypatch, xe2, xe3, supported):
+@pytest.mark.parametrize("bmg", [True, False], ids=["bmg", "non_bmg"])
+def test_moe_supports_device_architecture(monkeypatch, bmg):
     """An installed op must not select fused decode on an unsupported GPU."""
     monkeypatch.setattr(interface, "is_available", lambda: True)
-    monkeypatch.setattr(torch.ops._xpu_C, "is_xe2_arch", lambda _: xe2)
-    monkeypatch.setattr(torch.ops._xpu_C, "is_xe3_arch", lambda _: xe3)
+    monkeypatch.setattr(torch.xpu, "is_available", lambda: True)
+    monkeypatch.setattr(torch.ops._xpu_C, "is_bmg", lambda _: bmg,
+                        raising=False)
     assert (interface.supports(torch.float16, torch.float8_e4m3fn,
-                               8, 2048, 256) is supported)
+                               8, 2048, 256) is bmg)
 
 
 def test_moe_supports_explicit_device(monkeypatch):
     """Eligibility follows the supplied device rather than the current GPU."""
     monkeypatch.setattr(interface, "is_available", lambda: True)
-    monkeypatch.setattr(torch.ops._xpu_C, "is_xe2_arch",
-                        lambda device_index: device_index == 1)
-    monkeypatch.setattr(torch.ops._xpu_C, "is_xe3_arch", lambda _: False)
+    monkeypatch.setattr(torch.xpu, "is_available", lambda: True)
+    monkeypatch.setattr(torch.ops._xpu_C, "is_bmg",
+                        lambda device_index: device_index == 1, raising=False)
     assert interface.supports(torch.float16, torch.float8_e4m3fn,
                               8, 2048, 256, device=torch.device("xpu:1"))
     assert not interface.supports(torch.float16, torch.float8_e4m3fn,
@@ -287,7 +292,7 @@ def test_moe_supports_rejects_nonpositive_dimensions(monkeypatch, shape):
                                       "shared_w2", "shared_w2_scale",
                                       "shared_gate"])
 @pytest.mark.parametrize("destination", ["cpu", "xpu:1"])
-@requires_moe_kernel
+@requires_moe_op
 def test_moe_plan_rejects_weights_on_wrong_device(argument, destination):
     if destination == "xpu:1" and torch.xpu.device_count() < 2:
         pytest.skip("requires two XPUs")
@@ -302,7 +307,7 @@ def test_moe_plan_rejects_weights_on_wrong_device(argument, destination):
 
 
 @pytest.mark.parametrize("destination", ["cpu", "xpu:1"])
-@requires_moe_kernel
+@requires_moe_op
 def test_moe_plan_rejects_input_on_wrong_device(destination):
     if destination == "xpu:1" and torch.xpu.device_count() < 2:
         pytest.skip("requires two XPUs")
@@ -317,7 +322,7 @@ def test_moe_plan_rejects_input_on_wrong_device(destination):
     assert torch.isnan(output).all()
 
 
-@requires_moe_kernel
+@requires_moe_op
 def test_moe_plan_workspace_is_bound_to_weights_device():
     if torch.xpu.device_count() < 2:
         pytest.skip("requires two XPUs")
@@ -572,7 +577,7 @@ def test_moe_shared_fused_decode_rejects_unsupported_dimensions(shape):
 
 
 @pytest.mark.parametrize("argument", ["x", "topk_ids"])
-@requires_moe_kernel
+@requires_moe_op
 def test_moe_shared_fused_decode_rejects_wrong_input_rank(argument):
     args, _ = make_native_args()
     idx = _NATIVE_ARGS.index(argument)
