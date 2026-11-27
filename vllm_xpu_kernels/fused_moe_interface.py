@@ -259,48 +259,6 @@ class XpuFusedMoe:
         # the Python side below.
         self._uses_xe2 = _uses_xe2_grouped_gemm(w13)
 
-        # Weights and scales are taken in the layout vLLM loads them in --
-        # [E, N, K] with K packed for 4-bit, plus [E, N, K // group] scales --
-        # and are rewritten in place into whatever this device's grouped GEMM
-        # indexes, so callers never have to know the kernel layouts. The mark
-        # keeps rebuilding over the same parameters a no-op. ref_fused_moe
-        # consumes the loaded layout directly, so it skips the rewrite.
-        if not self._use_ref and not hasattr(w13, "xpu_fused_moe"):
-            if is_int4:
-                # change u4 to s4 to avoid zero point in gemm kernel
-                # The buffer must be int8: the grouped GEMM detects packed
-                # int4 weights via `B_dtype == at::kChar` (see
-                # csrc/xpu/grouped_gemm/xe_2/grouped_gemm_xe2_interface.hpp),
-                # and only then reads them as [E, N, K // 2].
-                w13_tmp = torch.empty_like(w13, dtype=torch.int8)
-                w2_tmp = torch.empty_like(w2, dtype=torch.int8)
-                for i in range(num_experts):
-                    w13_tmp[i] = implement_zp(w13[i])
-                    w2_tmp[i] = implement_zp(w2[i])
-                w13.data = w13_tmp.contiguous()
-                w2.data = w2_tmp.contiguous()
-
-            to_kernel_layout = _to_xe2_layout \
-                if self._uses_xe2 else _to_xe3_layout
-            w13_data, w13_scales_data = to_kernel_layout(w13, w13_scales)
-            w2_data, w2_scales_data = to_kernel_layout(w2, w2_scales)
-            w13.data = w13_data
-            w2.data = w2_data
-            if w13_scales is not None:
-                w13_scales.data = w13_scales_data
-            if w2_scales is not None:
-                w2_scales.data = w2_scales_data
-            w13.xpu_fused_moe = True
-
-        # 4bits support [E, N, K]
-        # other types [E, K, N]
-        if self._use_ref or is_int4 or is_mxfp4:
-            self.inter_size = w13.shape[-2] // 2
-        else:
-            self.inter_size = w13.shape[-1] // 2
-
-        assert w13.is_contiguous() and w2.is_contiguous()
-
         self.w13 = w13
         self.w2 = w2
 
@@ -351,6 +309,7 @@ class XpuFusedMoe:
             situ_beta=self.activation_situ_beta,
             situ_linear_beta=(-1.0 if self.activation_situ_linear_beta is None
                               else self.activation_situ_linear_beta))
+        self._update_inter_size()
 
         self.expert_map = expert_map
         if self.expert_map is None and self.ep_size > 1:
@@ -368,6 +327,57 @@ class XpuFusedMoe:
         else:
             self.total_experts_num = self.num_experts * self.ep_size
         self.local_experts_num = self.num_experts
+
+    def _update_inter_size(self) -> None:
+        # 4bits support [E, N, K]
+        # other types [E, K, N]
+        if self._use_ref or self.is_int4 or self.is_mxfp4:
+            self.inter_size = self.w13.shape[-2] // 2
+        else:
+            self.inter_size = self.w13.shape[-1] // 2
+
+    def prepack_weights(self) -> None:
+        """Convert weights and scales in place from checkpoint layout to the
+        device's grouped GEMM layout.
+
+        Weights and scales are expected in the layout vLLM loads them in --
+        ``[E, N, K]`` with ``K`` packed for 4-bit, plus ``[E, N, K // group]``
+        scales -- and are rewritten in place into whatever this device's
+        grouped GEMM indexes. ``ref_fused_moe`` consumes the loaded layout
+        directly, so this is a no-op when ``self._use_ref`` is True.
+        """
+        if not self._use_ref and not hasattr(self.w13, "xpu_fused_moe"):
+            if self.is_int4:
+                # change u4 to s4 to avoid zero point in gemm kernel
+                # The buffer must be int8: the grouped GEMM detects packed
+                # int4 weights via `B_dtype == at::kChar` (see
+                # csrc/xpu/grouped_gemm/xe_2/grouped_gemm_xe2_interface.hpp),
+                # and only then reads them as [E, N, K // 2].
+                w13_tmp = torch.empty_like(self.w13, dtype=torch.int8)
+                w2_tmp = torch.empty_like(self.w2, dtype=torch.int8)
+                for i in range(self.num_experts):
+                    w13_tmp[i] = implement_zp(self.w13[i])
+                    w2_tmp[i] = implement_zp(self.w2[i])
+                self.w13.data = w13_tmp.contiguous()
+                self.w2.data = w2_tmp.contiguous()
+
+            to_kernel_layout = _to_xe2_layout \
+                if self._uses_xe2 else _to_xe3_layout
+            w13_data, w13_scales_data = to_kernel_layout(
+                self.w13, self.gemm1_wei_scales)
+            w2_data, w2_scales_data = to_kernel_layout(
+                self.w2, self.gemm2_wei_scales)
+            self.w13.data = w13_data
+            self.w2.data = w2_data
+            if self.gemm1_wei_scales is not None:
+                self.gemm1_wei_scales.data = w13_scales_data
+            if self.gemm2_wei_scales is not None:
+                self.gemm2_wei_scales.data = w2_scales_data
+            self.w13.xpu_fused_moe = True
+
+            assert self.w13.is_contiguous() and self.w2.is_contiguous()
+
+        self._update_inter_size()
 
     def apply(
         self,

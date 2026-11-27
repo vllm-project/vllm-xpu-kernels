@@ -145,6 +145,7 @@ def calculate_diff(config):
                       n_experts_per_token=topk,
                       activation="silu",
                       num_experts=e)
+    moe.prepack_weights()
     output = torch.empty_like(a)
     moe.apply(output=output,
               hidden_states=a,
@@ -228,6 +229,7 @@ def get_benchmark():
                               n_experts_per_token=topk,
                               activation="silu",
                               num_experts=num_experts)
+            moe.prepack_weights()
             output = torch.empty_like(a)
 
             def run_vllm_moe():
@@ -257,6 +259,7 @@ def get_benchmark():
                             n_experts_per_token=topk,
                             activation="silu",
                             num_experts=num_experts)
+            moe.prepack_weights()
             output = torch.empty_like(a)
             # L2 cache flush buffer, mirroring triton.testing.do_bench, so
             # the per-sub-kernel timings are not biased by warm caches.

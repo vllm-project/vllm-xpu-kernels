@@ -73,6 +73,7 @@ def make_baseline(weights):
                          w2_scales=s2, w2_bias=None,
                          n_experts_per_token=TOP_K, activation="silu",
                          num_experts=NUM_EXPERTS)
+    routed.prepack_weights()
     inter = w2.shape[1]
 
     def run(x, topk_weights, topk_ids):
