@@ -194,8 +194,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
 
   TORCH_CHECK(
       v.scalar_type() == k_type, "key and value must have the same dtype");
+  const bool is_int8_kv = k_type == at::ScalarType::Char;
   if (k_type != at::ScalarType::Float8_e5m2 &&
-      k_type != at::ScalarType::Float8_e4m3fn) {
+      k_type != at::ScalarType::Float8_e4m3fn && !is_int8_kv) {
     TORCH_CHECK(
         k.scalar_type() == q_type, "query and key must have the same dtype");
     TORCH_CHECK(
@@ -228,8 +229,24 @@ std::vector<at::Tensor> mha_varlen_fwd(
     TORCH_CHECK(
         block_table.stride(-1) == 1,
         "page_table must have contiguous last dimension");
-    check_paged_kv_cache_strides(k, v);
+    if (is_int8_kv) {
+      // Split layout: block stride is not a multiple of the row stride.
+      check_int8_kv_cache(k, v, k_scale, v_scale);
+    } else {
+      check_paged_kv_cache_strides(k, v);
+    }
+  } else {
+    TORCH_CHECK(!is_int8_kv, "INT8 KV cache requires a paged KV cache");
   }
+  TORCH_CHECK(
+      !is_int8_kv || !q_is_fp8,
+      "INT8 KV cache requires a half or bfloat16 query");
+  // INT8 KV is implemented in the paged decode kernel only. Prefill / mixed
+  // batches should dequantize the referenced blocks and use the fp16/bf16 path.
+  TORCH_CHECK(
+      !is_int8_kv || max_seqlen_q == 1,
+      "INT8 KV cache is supported for decode (max_seqlen_q == 1) only; "
+      "dequantize the KV blocks for prefill");
 
   CHECK_DEVICE(cu_seqlens_q);
   CHECK_CONTIGUOUS(cu_seqlens_q);

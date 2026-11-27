@@ -85,3 +85,56 @@ inline void check_paged_kv_cache_strides(
           std::numeric_limits<int>::max(),
       "effective_total exceeds int32 range");
 }
+
+// INT8 per-token-head KV cache: int8 K/V views over the block-local split
+// layout
+// ([int8 K|V data for all (slot, head) | K scales fp32 | V scales fp32] per
+// block) plus fp32 scale caches [num_blocks, block_size, num_heads_kv] passed
+// as k_scale / v_scale. Validates everything the kernels rely on.
+inline void check_int8_kv_cache(
+    const at::Tensor& key_cache,
+    const at::Tensor& value_cache,
+    const std::optional<const at::Tensor>& k_scale,
+    const std::optional<const at::Tensor>& v_scale) {
+  TORCH_CHECK(
+      key_cache.scalar_type() == at::ScalarType::Char &&
+          value_cache.scalar_type() == at::ScalarType::Char,
+      "INT8 KV cache: key and value caches must both be int8");
+  TORCH_CHECK(
+      key_cache.dim() == 4 && value_cache.dim() == 4,
+      "INT8 KV cache must be paged: [num_blocks, block_size, num_heads_kv, "
+      "head_size]");
+  TORCH_CHECK(
+      k_scale.has_value() && v_scale.has_value(),
+      "INT8 KV cache requires per-token-head k_scale and v_scale caches");
+  for (const auto* s : {&*k_scale, &*v_scale}) {
+    TORCH_CHECK(
+        s->scalar_type() == at::ScalarType::Float && s->dim() == 3 &&
+            s->size(0) == key_cache.size(0) &&
+            s->size(1) == key_cache.size(1) && s->size(2) == key_cache.size(2),
+        "INT8 KV scale caches must be float32 [num_blocks, block_size, "
+        "num_heads_kv] matching the KV cache");
+  }
+  TORCH_CHECK(
+      k_scale->strides() == v_scale->strides(),
+      "INT8 KV k_scale and v_scale caches must have identical strides");
+  TORCH_CHECK(
+      key_cache.strides() == value_cache.strides(),
+      "INT8 KV key and value caches must have identical strides");
+  // Xe 2D block loads need 64-byte aligned surface bases; the kernels build one
+  // surface per (block, head) for K and for V.
+  auto addr = [](const at::Tensor& t) {
+    return reinterpret_cast<uintptr_t>(t.data_ptr());
+  };
+  TORCH_CHECK(
+      addr(key_cache) % 64 == 0 && addr(value_cache) % 64 == 0 &&
+          key_cache.stride(0) % 64 == 0 && key_cache.stride(2) % 64 == 0,
+      "INT8 KV cache: block, head and K/V base addresses must be 64-byte "
+      "aligned (head_size must be a multiple of 64 for the split layout); got "
+      "page stride ",
+      key_cache.stride(0),
+      ", head stride ",
+      key_cache.stride(2),
+      ", V offset ",
+      static_cast<int64_t>(addr(value_cache) - addr(key_cache)));
+}

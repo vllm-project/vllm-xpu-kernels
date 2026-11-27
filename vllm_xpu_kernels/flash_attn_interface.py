@@ -489,8 +489,15 @@ def flash_attn_varlen_func(
     if softmax_scale is None:
         softmax_scale = q.shape[-1]**(-0.5)
     q_descale = _normalize_descale_tensor(q_descale, "q_descale")
-    k_descale = _normalize_descale_tensor(k_descale, "k_descale")
-    v_descale = _normalize_descale_tensor(v_descale, "v_descale")
+    if k.dtype == torch.int8:
+        # INT8 per-token-head KV: k_descale / v_descale are the fp32 scale
+        # caches [num_blocks, block_size, num_heads_kv] (validated in C++).
+        if k_descale is None or v_descale is None:
+            raise ValueError("INT8 KV cache requires per-token-head "
+                             "k_descale and v_descale scale caches")
+    else:
+        k_descale = _normalize_descale_tensor(k_descale, "k_descale")
+        v_descale = _normalize_descale_tensor(v_descale, "v_descale")
     # custom op does not support non-tuple input
     real_window_size: tuple[int, int]
     if window_size is None:
@@ -614,7 +621,10 @@ def flash_attn_varlen_func(
                 dynamic_causal,
             )
         except RuntimeError as e:
-            if "not compiled" not in str(e) or dynamic_causal is not None:
+            # The reference fallback takes per-tensor descales only; INT8
+            # per-token-head KV (scale caches) must not fall back silently.
+            if ("not compiled" not in str(e) or dynamic_causal is not None
+                    or k.dtype == torch.int8):
                 raise
             # Fallback to PyTorch reference implementation.
             # Emit the notice once per unique missing config and write
