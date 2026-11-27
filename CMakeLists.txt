@@ -84,6 +84,26 @@ option(XPUMEM_ALLOCATOR_ENABLED "Build xpumem_allocator extension" ON)
 option(VLLM_XPU_ENABLE_ONEDNN
        "Build oneDNN-backed kernels (GEMM ops in _xpu_C extension)" ON)
 
+option(MINICPM5_MONO_KERNELS_ENABLED
+       "Build MiniCPM5 FP8 resident decoder kernels (Xe2)" ON)
+option(MINICPM5_MONO_DPAS_ENABLED "Build MiniCPM5 BF16 DPAS multirow decoder"
+       ON)
+option(MINICPM5_MONO_DPAS_ROW1_ENABLED
+       "Use single-row DPAS for MiniCPM5 projections" ON)
+option(MINICPM5_MONO_FAST_FP8_ENABLED
+       "Use exact packed FP8 to BF16 conversion without variable normalization"
+       ON)
+option(MINICPM5_MONO_BF16_FP8_HALF_ENABLED
+       "Decode FP8 weights through exact FP16 conversion for BF16 DPAS" ON)
+option(MINICPM5_MONO_REFERENCE_ATTENTION_ENABLED
+       "Use reference SLM/2D-block/context-chunk mono attention" ON)
+option(MINICPM5_MONO_REFERENCE_PROJECTION_ENABLED
+       "Use reference SLM operand tiles and subgroup K slices" ON)
+option(MINICPM5_MONO_REFERENCE_MOE_ENABLED
+       "Use reference expert union and KN block-load pipelines" ON)
+option(MINICPM5_MONO_REFERENCE_RUNTIME_ENABLED
+       "Use shared mono health and parallel page validation" ON)
+
 # KERNEL CONFIGURATION — controls which paged decode kernel variants are
 # compiled. Use model-specific configs to dramatically reduce compile time. See
 # csrc/xpu/attn/kernel_configs/ for available presets.
@@ -584,6 +604,85 @@ endif()
 #
 # Define other extension targets
 #
+
+if(MINICPM5_MONO_KERNELS_ENABLED AND VLLM_XPU_ENABLE_XE2)
+  set(MINICPM5_COMPILE_FLAGS ${VLLM_GPU_COMPILE_FLAGS})
+  set(MINICPM5_LINK_FLAGS ${VLLM_GPU_LINK_FLAGS})
+  list(REMOVE_ITEM MINICPM5_COMPILE_FLAGS -DVLLM_XPU_ENABLE_XE3P
+       -DVLLM_XPU_HAS_INTEL_GPU_CRI)
+  if(AOT_DEVICES)
+    # The common extension AOT list can include PVC and Xe3/CRI.
+    string(REPLACE "," ";" MINICPM5_AOT_DEVICES "${AOT_DEVICES}")
+    list(FILTER MINICPM5_AOT_DEVICES INCLUDE REGEX "^bmg(-g(21|31)(-a0)?)?$")
+    list(REMOVE_DUPLICATES MINICPM5_AOT_DEVICES)
+    list(REMOVE_ITEM MINICPM5_LINK_FLAGS "-device ${AOT_DEVICES}")
+    if(MINICPM5_AOT_DEVICES)
+      list(JOIN MINICPM5_AOT_DEVICES "," MINICPM5_AOT_DEVICES)
+      list(APPEND MINICPM5_LINK_FLAGS "-device ${MINICPM5_AOT_DEVICES}")
+    else()
+      list(REMOVE_ITEM MINICPM5_COMPILE_FLAGS -fsycl-targets=spir64_gen)
+      list(REMOVE_ITEM MINICPM5_LINK_FLAGS -fsycl-targets=spir64_gen
+           -Xsycl-target-backend=spir64_gen)
+    endif()
+  endif()
+  define_gpu_extension_target(
+    _minicpm5_mono_C
+    DESTINATION
+    vllm_xpu_kernels
+    LANGUAGE
+    ${VLLM_GPU_LANG}
+    SOURCES
+    "csrc/minicpm5/mono.cpp"
+    "csrc/minicpm5/mono_fp16.cpp"
+    "csrc/minicpm5/tail_rows4_fp16.cpp"
+    "csrc/minicpm5/draft_fp16.cpp"
+    COMPILE_FLAGS
+    ${MINICPM5_COMPILE_FLAGS}
+    "-ffp-contract=fast"
+    LINK_FLAGS
+    ${MINICPM5_LINK_FLAGS}
+    "-fsycl-device-code-split=per_kernel"
+    LIBRARIES
+    ze_loader
+    INCLUDE_DIRECTORIES
+    csrc
+    WITH_SOABI)
+  if(MINICPM5_MONO_DPAS_ENABLED)
+    target_compile_definitions(_minicpm5_mono_C
+                               PRIVATE MINICPM5_MONO_DPAS_ENABLED=1)
+  endif()
+  if(MINICPM5_MONO_DPAS_ROW1_ENABLED)
+    if(NOT MINICPM5_MONO_DPAS_ENABLED)
+      message(FATAL_ERROR "MiniCPM5 row1 DPAS requires the DPAS decoder")
+    endif()
+    target_compile_definitions(_minicpm5_mono_C
+                               PRIVATE MINICPM5_MONO_DPAS_ROW1_ENABLED=1)
+  endif()
+  foreach(
+    opt
+    MINICPM5_MONO_REFERENCE_ATTENTION_ENABLED
+    MINICPM5_MONO_REFERENCE_PROJECTION_ENABLED
+    MINICPM5_MONO_REFERENCE_MOE_ENABLED)
+    if(${opt})
+      if(NOT MINICPM5_MONO_DPAS_ENABLED)
+        message(FATAL_ERROR "${opt} requires the MiniCPM5 DPAS decoder")
+      endif()
+      target_compile_definitions(_minicpm5_mono_C PRIVATE ${opt}=1)
+    endif()
+  endforeach()
+  if(MINICPM5_MONO_REFERENCE_RUNTIME_ENABLED)
+    target_compile_definitions(
+      _minicpm5_mono_C PRIVATE MINICPM5_MONO_REFERENCE_RUNTIME_ENABLED=1)
+  endif()
+  if(MINICPM5_MONO_FAST_FP8_ENABLED)
+    target_compile_definitions(_minicpm5_mono_C
+                               PRIVATE MINICPM5_MONO_FAST_FP8_ENABLED=1)
+  endif()
+  if(MINICPM5_MONO_BF16_FP8_HALF_ENABLED)
+    target_compile_definitions(_minicpm5_mono_C
+                               PRIVATE MINICPM5_MONO_BF16_FP8_HALF_ENABLED=1)
+  endif()
+endif()
 
 #
 # Xe3(p)-only companion libraries.

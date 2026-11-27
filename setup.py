@@ -12,6 +12,7 @@ from shutil import which
 
 from packaging.version import Version
 from setuptools import Extension, setup
+from setuptools.command.build import build
 from setuptools.command.build_ext import build_ext
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import SYCL_HOME
@@ -73,10 +74,28 @@ def _is_enabled(env_name: str, default: str = "ON") -> bool:
     return val not in ("0", "OFF", "FALSE", "NO")
 
 
+def _build_minicpm5_mono() -> bool:
+    return (_is_enabled("MINICPM5_MONO_KERNELS_ENABLED")
+            and _is_enabled("VLLM_XPU_ENABLE_XE2"))
+
+
+class kernel_build(build):
+
+    def finalize_options(self) -> None:
+        default_build_lib = self.build_lib is None
+        super().finalize_options()
+        if (default_build_lib and not envs.VLLM_USE_PRECOMPILED
+                and not _build_minicpm5_mono()):
+            # Wheel staging copies the whole build_lib tree. Keep the opt-out
+            # staging separate while allowing CMake to reuse build/temp.
+            self.build_lib += "-without-minicpm5"
+
+
 class CMakeExtension(Extension):
 
-    def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
-        super().__init__(name, sources=[], py_limited_api=True, **kwa)
+    def __init__(self, name: str, cmake_lists_dir: str = '.', *,
+                 py_limited_api: bool = True, **kwa) -> None:
+        super().__init__(name, sources=[], py_limited_api=py_limited_api, **kwa)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 
@@ -179,6 +198,7 @@ class cmake_build_ext(build_ext):
             "MOE_KERNELS_ENABLED",
             "GDN_KERNELS_ENABLED",
             "MQA_LOGITS_KERNELS_ENABLED",
+            "MINICPM5_MONO_KERNELS_ENABLED",
             "XPU_SPECIFIC_KERNELS_ENABLED",
             "XPUMEM_ALLOCATOR_ENABLED",
             "VLLM_XPU_ENABLE_ONEDNN",
@@ -207,6 +227,19 @@ class cmake_build_ext(build_ext):
         if _chunk_prefill_config:
             cmake_args.append(
                 '-DVLLM_CHUNK_PREFILL_CONFIG={}'.format(_chunk_prefill_config))
+
+        for opt in (
+            "MINICPM5_MONO_DPAS_ENABLED",
+            "MINICPM5_MONO_DPAS_ROW1_ENABLED",
+            "MINICPM5_MONO_FAST_FP8_ENABLED",
+            "MINICPM5_MONO_BF16_FP8_HALF_ENABLED",
+            "MINICPM5_MONO_REFERENCE_ATTENTION_ENABLED",
+            "MINICPM5_MONO_REFERENCE_PROJECTION_ENABLED",
+            "MINICPM5_MONO_REFERENCE_MOE_ENABLED",
+            "MINICPM5_MONO_REFERENCE_RUNTIME_ENABLED",
+        ):
+            cmake_args.append('-D{}={}'.format(
+                opt, "ON" if _is_enabled(opt) else "OFF"))
 
         # Override the base directory for FetchContent downloads to $ROOT/.deps
         # This allows sharing dependencies between profiles,
@@ -575,6 +608,9 @@ if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
                 "/csrc/xpu/grouped_gemm/xe_3")
 
 if _build_custom_ops():
+    if _build_minicpm5_mono():
+        ext_modules.append(CMakeExtension(
+            name="vllm_xpu_kernels._minicpm5_mono_C", py_limited_api=False))
     if _is_enabled("BASIC_KERNELS_ENABLED"):
         ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
     if _is_enabled("FA2_KERNELS_ENABLED"):
@@ -587,11 +623,10 @@ if _build_custom_ops():
         ext_modules.append(
             CMakeExtension(name="vllm_xpu_kernels.xpumem_allocator"))
 
+cmdclass = {"build": kernel_build}
 if ext_modules:
-    cmdclass = {
-        "build_ext":
-        precompiled_build_ext if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
-    }
+    cmdclass["build_ext"] = (
+        precompiled_build_ext if envs.VLLM_USE_PRECOMPILED else cmake_build_ext)
 
 setup(
     version=get_vllm_version(),
