@@ -191,6 +191,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int forced_token_heads_per_warp=-1) -> ()");
   ops.impl("fused_qk_norm_rope", torch::kXPU, &fused_qk_norm_rope);
 
+  // Direct symmetric-memory DCP all-to-all with LSE reduction.
+  ops.def(
+      "direct_dcp_a2a_lse_reduce("
+      "Tensor partial_output, Tensor partial_lse, Tensor? seq_lens, "
+      "Tensor? query_start_loc, Tensor peer_output_ptrs, "
+      "Tensor peer_lse_ptrs, Tensor peer_signal_ptrs, Tensor! received_output, "
+      "Tensor! received_lse, Tensor! received_signal, Tensor! epoch, "
+      "Tensor! combined_output, int world_size, int rank, "
+      "int max_num_tokens, bool is_lse_base_on_e) -> ()");
+  ops.impl(
+      "direct_dcp_a2a_lse_reduce", torch::kXPU, &direct_dcp_a2a_lse_reduce);
+
   // Compute FP8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "

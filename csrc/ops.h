@@ -395,4 +395,22 @@ void ngram_compute_n_gram_ids(
     torch::Tensor& column_starts,
     torch::Tensor& n_gram_ids);
 
+void direct_dcp_a2a_lse_reduce(
+    torch::Tensor const& partial_output,
+    torch::Tensor const& partial_lse,
+    std::optional<torch::Tensor> const& seq_lens,
+    std::optional<torch::Tensor> const& query_start_loc,
+    torch::Tensor const& peer_output_ptrs,
+    torch::Tensor const& peer_lse_ptrs,
+    torch::Tensor const& peer_signal_ptrs,
+    torch::Tensor& received_output,
+    torch::Tensor& received_lse,
+    torch::Tensor& received_signal,
+    torch::Tensor& epoch,
+    torch::Tensor& combined_output,
+    int64_t world_size,
+    int64_t rank,
+    int64_t max_num_tokens,
+    bool is_lse_base_on_e);
+
 std::tuple<int64_t, int64_t> getMemoryInfo(int64_t device_index);

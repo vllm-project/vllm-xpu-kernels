@@ -668,6 +668,7 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/quantization/fused_kernels/fused_silu_mul_mxfp4_quant.cpp"
       "csrc/xpu_view.cpp"
       "csrc/attention/merge_attn_states.cpp"
+      "csrc/attention/dcp_direct_a2a_lse_reduce.cpp"
       "csrc/tensor_utils.cpp"
       "csrc/utils/mem_cpy.cpp"
       "csrc/utils/host_register.cpp"
