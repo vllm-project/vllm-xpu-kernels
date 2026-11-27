@@ -23,13 +23,13 @@ MINI_PYTEST_PARAMS = {
 
 # Test parameters
 NUM_ROWS = [1, 32, 2050, 8239]
-TOP_K_VALUES = [2048, 3000]
+TOP_K_VALUES = [512, 1024, 2048, 3000]
 BATCH_SIZE = [1, 2, 512]
 NEXT_N = [1, 8]
 DATA_GENERATION = ["random", "10LSBits"]
 # > 200 * 1000 to test split work,
 # only use for large vocab test
-VOCAB_SIZE = [300000]
+VOCAB_SIZE = [250000, 300000]
 
 
 def create_random_logits(
