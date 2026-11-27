@@ -2,14 +2,29 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
+#include <mutex>
 
 #include "ops.h"
 #include "utils.h"
+#include "utils/mem_cpy.h"
 
 namespace vllm {
 namespace xpu {
 
 namespace {
+
+// Ranges registered through hostRegister. SYCL reports an imported range as
+// usm::alloc::unknown, so callers that must tell a registered (DMA-capable)
+// range from pageable memory look it up here.
+std::mutex& registeredMutex() {
+  static std::mutex m;
+  return m;
+}
+std::map<uintptr_t, size_t>& registeredRanges() {
+  static std::map<uintptr_t, size_t> r;
+  return r;
+}
 
 // Page-locks an existing host allocation and imports it into the current
 // device's SYCL context, the SYCL counterpart of cudaHostRegister. Host
@@ -32,6 +47,10 @@ bool hostRegister(void* ptr, size_t n_bytes) {
         "); transfers stay correct but fall back to pageable host memory");
     return false;
   }
+  {
+    std::lock_guard<std::mutex> g(registeredMutex());
+    registeredRanges()[reinterpret_cast<uintptr_t>(ptr)] = n_bytes;
+  }
   return true;
 }
 
@@ -39,6 +58,10 @@ bool hostRegister(void* ptr, size_t n_bytes) {
 bool hostUnregister(void* ptr) {
   if (ptr == nullptr) return false;
 
+  {
+    std::lock_guard<std::mutex> g(registeredMutex());
+    registeredRanges().erase(reinterpret_cast<uintptr_t>(ptr));
+  }
   auto ctx = vllm::xpu::vllmGetQueue().get_context();
   try {
     syclex::release_from_device_copy(ptr, ctx);
@@ -50,6 +73,16 @@ bool hostUnregister(void* ptr) {
 }
 
 }  // namespace
+
+bool isHostRegistered(const void* ptr, size_t n_bytes) {
+  const auto p = reinterpret_cast<uintptr_t>(ptr);
+  std::lock_guard<std::mutex> g(registeredMutex());
+  auto& ranges = registeredRanges();
+  auto it = ranges.upper_bound(p);
+  if (it == ranges.begin()) return false;
+  --it;
+  return p >= it->first && p + n_bytes <= it->first + it->second;
+}
 
 }  // namespace xpu
 }  // namespace vllm
