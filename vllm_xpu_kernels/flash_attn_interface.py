@@ -516,6 +516,19 @@ def flash_attn_varlen_func(
             raise NotImplementedError(
                 "FA2 only supports both KV cache descaled")
 
+        # Fail closed on softcap / ALIBI: the XPU FA2 kernels do not
+        # implement them yet, and silently ignoring them returns wrong
+        # results for Gemma-style softcap / ALIBI models. The spec-decode
+        # fast path below is already gated on softcap == 0.0 and
+        # alibi_slopes is None, so raising here does not change it.
+        if alibi_slopes is not None:
+            raise NotImplementedError(
+                "alibi_slopes is not implemented on XPU flash attention yet")
+        if softcap is not None and softcap != 0.0:
+            raise NotImplementedError(
+                f"softcap={softcap} is not implemented on XPU flash "
+                "attention yet (pass softcap=0)")
+
         # Compute per-seq splits and work_list on host, upload to device.
         # Only enable for decode (max_seqlen_q == 1) with paged KV cache,
         # multi-seq batches, and global num_splits_kv > 1.
